@@ -17,20 +17,9 @@ Mutual-agreement adoption plus re-adoption, purely cost-driven:
 
 No crossing, inside or area tests anywhere. All decisions go through one cost function (`COSTS` in `js/solver.js`).
 
-## Beam search
+## Racing cost functions
 
-The greedy run always takes the cheapest agreed pair. With **Beam search** (Algorithm panel) the construction keeps several partial tours, forks each into its cheapest agreed pairs at every step, drops duplicates and keeps the best. The animation replays the winning branch. Dragging points always uses the greedy run so it stays instant.
-
-Measured on 8 random 120-point instances, arcs up to 3 points, against OR-Tools:
-
-| Search | Average length vs OR-Tools | Time |
-| --- | --- | --- |
-| Greedy | +0.86% | 51 ms |
-| Beam 8 x 3 | -0.07% (-0.22% with look-ahead weight 0) | 0.6 s |
-| Beam 16 x 3 | +0.33% (-0.10% with weight 0) | 1.2 s |
-| Best of 20 different configurations | -0.53% | about 14 s one after another |
-
-Wider beams did not reliably help, and with 8 instances differences of a few tenths of a percent are noise (`tests/beam.mjs`, `tests/beam_alpha.mjs`, `tests/portfolio.mjs`).
+Every decision goes through one cost function (`COSTS` in `js/solver.js`, ten of them). Each run is plain greedy, always the cheapest agreed pair, but different costs build different tours. The page runs one greedy build per cost on a pool of Web Workers and keeps the shortest. Click a row under *Race results* to replay that cost's timeline. With racing off, one run uses the cost chosen under Algorithm. Dragging points always uses a single run so it stays instant.
 
 ## Run locally
 
@@ -58,20 +47,20 @@ python3 -m http.server
 cd tests
 node parity.mjs        # same points through the Python original and the JS port; lengths must match
 node speed.mjs         # timings by n and arc size
-node beam_events.mjs   # beam-search timelines must replay consistently
-node beam.mjs          # beam search vs greedy vs OR-Tools
-node portfolio.mjs     # best of many configurations vs OR-Tools
-node bench_js.mjs && python3 bench_ortools.py 2   # regenerate the OR-Tools comparison (needs: pip install ortools numpy scipy matplotlib)
+node costs.mjs         # single cost functions and best-of portfolios on seeds 1-8
+node bench_race.mjs && python3 race_ortools.py 2   # the fresh-seed comparison above
+node time_costs.mjs    # time per cost function
+node bench_js.mjs && python3 bench_ortools.py 2   # OR-Tools on seeds 1-8 (needs: pip install ortools numpy scipy matplotlib)
 ```
 
 `parity.mjs` compares 36 instances (3 layouts, 12 / 25 / 40 points, 2 seeds, arcs of 1 and 3). All tour lengths match the Python original.
 
-OR-Tools comparison, 8 random instances per size, OR-Tools given `3 + n/5` seconds, arcs limited to 4 points:
+Fresh instances (seeds 11-18, not used to choose the cost functions), 8 per size, OR-Tools given `3 + n/5` seconds, the page's default arc sizes:
 
-| Points | Average length vs OR-Tools | Shorter / equal | Adoption tour | OR-Tools |
+| Points | One greedy run vs OR-Tools | Race of 10 vs OR-Tools | Race: shorter / equal | OR-Tools time |
 | --- | --- | --- | --- | --- |
-| 30 | +1.17% | 0 / 2 of 8 | 9 ms | 9 s |
-| 60 | 0.00% | 3 / 1 of 8 | 31 ms | 15 s |
-| 120 | +0.11% | 4 / 0 of 8 | 211 ms | 27 s |
+| 30 | +0.23% | +0.08% | 0 / 6 of 8 | 9 s |
+| 60 | +0.27% | -0.61% | 4 / 3 of 8 | 15 s |
+| 120 | +0.84% | -0.49% | 5 / 0 of 8 | 27 s |
 
-One run per instance, one machine. The in-page "reference" is a 2-opt + Or-opt iterated local search, not OR-Tools (which can't run in a browser); in this test it beat OR-Tools on all 8 of the 120-point instances.
+The ten runs take about 10 s one after another at 120 points; spread over workers the wall time is set by the slowest single run (about 2 s, estimated from per-run timings). One run per instance, one machine. The in-page "reference" is a 2-opt + Or-opt iterated local search, not OR-Tools (which can't run in a browser).

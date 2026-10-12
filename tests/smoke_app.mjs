@@ -6,7 +6,7 @@ const stubEl = (id) => {
   const e = {
     id, value: "", checked: true, hidden: false, disabled: false, textContent: "", innerHTML: "", dataset: {}, style: {}, max: "0",
     width: 0, height: 0, children: [], onclick: null, oninput: null, onchange: null,
-    addEventListener: noop, setAttribute: noop, setPointerCapture: noop, scrollIntoView: noop,
+    addEventListener: noop, setAttribute: noop, append: noop, setPointerCapture: noop, scrollIntoView: noop,
     getBoundingClientRect: () => ({ left: 0, top: 0, width: 1000, height: 700 }),
     getContext: (k) => (k === "webgl" ? proxyGL() : new Proxy({}, { get: (t, p) => (p in t ? t[p] : () => {}), set: (t, p, v) => { t[p] = v; return true; } })),
     matches: () => false,
@@ -16,7 +16,7 @@ const stubEl = (id) => {
 const els = {};
 globalThis.document = {
   getElementById: (id) => (els[id] ??= stubEl(id)),
-  querySelectorAll: () => [], activeElement: null,
+  querySelectorAll: () => [], activeElement: null, createElement: (t) => stubEl(t),
 };
 globalThis.matchMedia = () => ({ matches: false });
 globalThis.ResizeObserver = class { constructor(f) { this.f = f; } observe() {} };
@@ -36,6 +36,7 @@ async function run(seconds) {
 }
 await run(3);                        // initial animation
 console.log("after 3 s: caption =", JSON.stringify(els.caption.textContent));
+console.log("  search:", els.sSearch.textContent, "| race box hidden:", els.raceBox.hidden);
 for (const id of ["sLen", "sStep", "sBuilt", "sMoves", "sRef"]) console.log(" ", id, "=", els[id].textContent);
 await sleep(2500); await run(20);    // let the animation and the reference search finish
 console.log("late: caption =", JSON.stringify(els.caption.textContent));

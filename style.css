@@ -180,3 +180,13 @@ tbody tr:last-child > * { border-bottom: 0; }
   .hud-title p { font-size: 13.5px; }
   .caption { font-size: 13.5px; }
 }
+
+/* race results */
+.race[hidden] { display: none; }
+.race-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.race-list button { width: 100%; display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: baseline; text-align: left; padding: 7px 10px; border-radius: 8px; border: 1px solid transparent; background: transparent; font-size: 13.5px; }
+.race-list button:hover { background: var(--vellum); }
+.race-list button[aria-pressed="true"] { background: var(--vellum); border-color: var(--ink); }
+.race-list .rlen { font-weight: 600; }
+.race-list .rgap { color: var(--ink-2); min-width: 4.8em; text-align: right; }
+.race-list li:first-child .rgap { color: var(--jade); font-weight: 600; }
