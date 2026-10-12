@@ -2,7 +2,7 @@
 
 Watch a travelling salesman tour grow inward from the convex hull, one agreed move at a time, drawn live in WebGL.
 
-**Live site:** https://prat8897.github.io/tsp-visualiser/
+**Live site:** https://prat8897.github.io/tsp-visualizer/
 
 Click the sheet to place your own points, drag them around and the tour re-solves as you move. Or pick a layout (random, clusters, ring, grid, spiral) and scrub through how it was built.
 
