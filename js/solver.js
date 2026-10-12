@@ -36,6 +36,9 @@ export const DEFAULTS = {
   readopt: true,
   requireShorter: true,
   maxChains: 400000,     // safety valve: arc enumeration grows fast with arcMax
+  beamWidth: 1,          // > 1 turns on beam search
+  branch: 2,             // beam search: agreed pairs each state forks into
+  estimateWeight: 0,     // beam search: weight of the cheapest-insertion look-ahead for points still outside (0 = compare partial tour length only)
 };
 
 /* ------------------------------------------------------------------ helpers */
@@ -161,25 +164,19 @@ export function makeInstance(kind, n, seed) {
   return Float64Array.from(pts.map((v) => Math.round(v * 10) / 10));
 }
 
-/* ------------------------------------------------------------------ the construction */
-export function construct(P, n, userOpts = {}) {
-  const t0 = (typeof performance !== "undefined" ? performance : Date).now();
+/* ------------------------------------------------------------------ the construction
+   Split into a shared context (distances, candidate arcs), a cloneable state, and step helpers,
+   so the same code drives both the single greedy run and the beam search. */
+function makeContext(P, n, userOpts) {
   const o = { ...DEFAULTS, ...userOpts };
   const cost = (COSTS[o.cost] || COSTS.detour).fn;
-  const perPoint = o.rankBy === "per_point";
   const D = distanceMatrix(P, n);
-
-  let tour = convexHull(P, n);
-  const hull = tour.slice();
+  const hull = convexHull(P, n);
   const isHull = new Uint8Array(n);
   for (const v of hull) isHull[v] = 1;
-  const adopted = new Uint8Array(n);
-  for (const v of hull) adopted[v] = 1;
-  let remaining = n - hull.length;
-  const lastChange = new Int32Array(n).fill(-1);
   const arcMax = o.useArcs ? Math.max(1, o.arcMax | 0) : 1;
 
-  /* ---- every arc that can be adopted: ordered chains of 1..arcMax unadopted, nearby points ---- */
+  // every arc that can be adopted: ordered chains of 1..arcMax unadopted, nearby points
   const interior = [];
   for (let i = 0; i < n; i++) if (!isHull[i]) interior.push(i);
   const knn = Math.min(o.knn, n - 1);
@@ -196,8 +193,8 @@ export function construct(P, n, userOpts = {}) {
     const prev = levels[levels.length - 1];
     let out = new Int32Array(1 << 16), cnt = 0, over = false;
     for (let ci = 0; ci < prev.count && !over; ci++) {
-      const base = ci * prev.L, last = prev.data[base + prev.L - 1];
-      for (const q of adj[last]) {
+      const base = ci * prev.L, lastPt = prev.data[base + prev.L - 1];
+      for (const q of adj[lastPt]) {
         let dup = false;
         for (let t = 0; t < prev.L; t++) if (prev.data[base + t] === q) { dup = true; break; }
         if (dup) continue;
@@ -213,150 +210,282 @@ export function construct(P, n, userOpts = {}) {
     levels.push({ L, count: cnt, data: out.subarray(0, cnt * L) });
     totalChains += cnt;
   }
-  const arcMaxUsed = levels[levels.length - 1].L;
 
   const C = totalChains;
   const chainStart = new Int32Array(C), chainLen = new Uint8Array(C);
   const chainPts = new Int32Array(levels.reduce((s, l) => s + l.count * l.L, 0));
   const first = new Int32Array(C), last = new Int32Array(C);
   const arcLen = new Float64Array(C), kPts = new Float64Array(C);
-  {
-    let ci = 0, off = 0;
-    for (const lv of levels) {
-      for (let c = 0; c < lv.count; c++, ci++) {
-        chainStart[ci] = off; chainLen[ci] = lv.L;
-        let len = 0;
-        for (let t = 0; t < lv.L; t++) {
-          chainPts[off + t] = lv.data[c * lv.L + t];
-          if (t > 0) len += D[chainPts[off + t - 1] * n + chainPts[off + t]];
-        }
-        first[ci] = chainPts[off]; last[ci] = chainPts[off + lv.L - 1];
-        arcLen[ci] = len; kPts[ci] = lv.L;
-        off += lv.L;
+  let ci = 0, off = 0;
+  for (const lv of levels) {
+    for (let c = 0; c < lv.count; c++, ci++) {
+      chainStart[ci] = off; chainLen[ci] = lv.L;
+      let len = 0;
+      for (let t = 0; t < lv.L; t++) {
+        chainPts[off + t] = lv.data[c * lv.L + t];
+        if (t > 0) len += D[chainPts[off + t - 1] * n + chainPts[off + t]];
       }
+      first[ci] = chainPts[off]; last[ci] = chainPts[off + lv.L - 1];
+      arcLen[ci] = len; kPts[ci] = lv.L;
+      off += lv.L;
     }
   }
-  let aliveList = Int32Array.from({ length: C }, (_, i) => i);
-  const rowEdge = new Int32Array(C);
-  const chainOf = (ci) => Array.from(chainPts.subarray(chainStart[ci], chainStart[ci] + chainLen[ci]));
+  return {
+    P, n, o, cost, perPoint: o.rankBy === "per_point", D, hull, isHull, arcMax,
+    C, chainStart, chainLen, chainPts, first, last, arcLen, kPts,
+    arcMaxUsed: levels[levels.length - 1].L, capped: cappedAt > 0,
+    rowEdge: new Int32Array(C),
+    chainOf: (c) => Array.from(chainPts.subarray(chainStart[c], chainStart[c] + chainLen[c])),
+  };
+}
 
-  /* ---- one adoption step: both forces must agree ---- */
-  function adoptStep(stepI) {
-    const m = tour.length;
-    const colBest = new Float64Array(m).fill(Infinity), colArg = new Int32Array(m).fill(-1);
-    const Dab = new Float64Array(m);
-    for (let e = 0; e < m; e++) Dab[e] = D[tour[e] * n + tour[(e + 1) % m]];
-    const T = Int32Array.from(tour), Bn = new Int32Array(m);
-    for (let e = 0; e < m; e++) Bn[e] = tour[(e + 1) % m];
+function newState(ctx) {
+  const adopted = new Uint8Array(ctx.n);
+  for (const v of ctx.hull) adopted[v] = 1;
+  return {
+    tour: ctx.hull.slice(), adopted, remaining: ctx.n - ctx.hull.length,
+    lastChange: new Int32Array(ctx.n).fill(-1),
+    alive: Int32Array.from({ length: ctx.C }, (_, i) => i),     // arcs whose points are all unadopted
+  };
+}
 
-    for (let t = 0; t < aliveList.length; t++) {
-      const ci = aliveList[t], f = first[ci], l = last[ci], len = arcLen[ci], k = kPts[ci];
-      let rb = Infinity, re = -1;
-      for (let e = 0; e < m; e++) {
-        const c = cost(D[T[e] * n + f], len, D[l * n + Bn[e]], Dab[e], k);
-        const met = perPoint ? c / k : c;
-        if (met < rb) { rb = met; re = e; }
-        if (met < colBest[e]) { colBest[e] = met; colArg[e] = ci; }
-      }
-      rowEdge[ci] = re;
-    }
-    const agreedRaw = [];
+function cloneState(s) {
+  return { tour: s.tour.slice(), adopted: s.adopted.slice(), remaining: s.remaining, lastChange: s.lastChange.slice(), alive: s.alive };
+}
+
+/** Both forces for every candidate and edge. Returns the pairs where they agree: [chainIndex, edgeIndex, metric]. */
+function agreedPairs(ctx, st) {
+  const { n, D, cost, perPoint, first, last, arcLen, kPts, rowEdge } = ctx;
+  const tour = st.tour, m = tour.length, alive = st.alive;
+  const colBest = new Float64Array(m).fill(Infinity), colArg = new Int32Array(m).fill(-1);
+  const Dab = new Float64Array(m), T = Int32Array.from(tour), Bn = new Int32Array(m);
+  for (let e = 0; e < m; e++) { Bn[e] = tour[(e + 1) % m]; Dab[e] = D[T[e] * n + Bn[e]]; }
+  for (let t = 0; t < alive.length; t++) {
+    const ci = alive[t], f = first[ci], l = last[ci], len = arcLen[ci], k = kPts[ci];
+    let rb = Infinity, re = -1;
     for (let e = 0; e < m; e++) {
-      const ci = colArg[e];
-      if (ci >= 0 && rowEdge[ci] === e) agreedRaw.push([ci, e, colBest[e]]);
+      const c = cost(D[T[e] * n + f], len, D[l * n + Bn[e]], Dab[e], k);
+      const met = perPoint ? c / k : c;
+      if (met < rb) { rb = met; re = e; }
+      if (met < colBest[e]) { colBest[e] = met; colArg[e] = ci; }
     }
-    if (!agreedRaw.length) throw new Error("no agreed pair -- is the cost function returning NaN?");
-    let pick = agreedRaw[0];
-    for (const x of agreedRaw) {
-      if (o.order === "best" ? x[2] < pick[2] : x[2] > pick[2]) pick = x;
-    }
-    const costOf = (ci, e) => cost(D[T[e] * n + first[ci]], arcLen[ci], D[last[ci] * n + Bn[e]], Dab[e], kPts[ci]);
-    const [pci, e] = pick;
-    const ch = chainOf(pci);
-    const ev = {
-      type: "adopt", step: stepI, chain: ch, edge: e, a: tour[e], c: tour[(e + 1) % m],
-      cost: costOf(pci, e), metric: pick[2],
-      agreed: agreedRaw.map(([ci, ee, met]) => ({ chain: chainOf(ci), edge: ee, metric: met, cost: costOf(ci, ee) })),
-    };
-    tour = tour.slice(0, e + 1).concat(ch, tour.slice(e + 1));
-    for (const p of ch) { adopted[p] = 1; lastChange[p] = stepI; remaining--; }
-    const keep = [];
-    for (let t = 0; t < aliveList.length; t++) {
-      const ci = aliveList[t];
-      let ok = true;
-      for (let q = 0; q < chainLen[ci]; q++) if (adopted[chainPts[chainStart[ci] + q]]) { ok = false; break; }
-      if (ok) keep.push(ci);
-    }
-    aliveList = Int32Array.from(keep);
-    ev.tourAfter = tour.slice();
-    return ev;
+    rowEdge[ci] = re;
   }
+  const pairs = [];
+  for (let e = 0; e < m; e++) {
+    const ci = colArg[e];
+    if (ci >= 0 && rowEdge[ci] === e) pairs.push([ci, e, colBest[e]]);
+  }
+  if (!pairs.length) throw new Error("no agreed pair -- is the cost function returning NaN?");
+  return { pairs, T, Bn, Dab };
+}
 
-  /* ---- re-adoption: lift an adopted point / arc out and re-adopt it into another edge ---- */
-  function bestReadopt(stepI) {
-    const m = tour.length;
-    const movable = new Uint8Array(m);
-    for (let i = 0; i < m; i++) movable[i] = !isHull[tour[i]] && lastChange[tour[i]] < stepI ? 1 : 0;
-    let best = null;                                   // {gain, i, L, j, reverse}
-    let bestGain = 0;
-    const rest = new Int32Array(m);
-    for (let i = 0; i < m; i++) {
-      let length = 0;
-      for (let L = 1; L <= arcMax; L++) {
-        if (m - L < 3 || !movable[(i + L - 1) % m]) break;
-        const a0 = tour[i], aL = tour[(i + L - 1) % m];
-        if (L > 1) length += D[tour[(i + L - 2) % m] * n + aL];
-        const u = tour[(i - 1 + m) % m], w = tour[(i + L) % m];
-        const costHere = cost(D[u * n + a0], length, D[aL * n + w], D[u * n + w], L);
-        const realHere = D[u * n + a0] + length + D[aL * n + w] - D[u * n + w];
-        const rl = m - L;                              // the tour without the arc: w ... u
-        for (let q = 0; q < rl; q++) rest[q] = tour[(i + L + q) % m];
-        for (let rev = 0; rev < (L > 1 ? 2 : 1); rev++) {
-          const f = rev ? aL : a0, l = rev ? a0 : aL;
-          for (let j = 0; j < rl - 1; j++) {
-            const ea = rest[j], eb = rest[j + 1];
-            const dab = D[ea * n + eb];
-            const nf = D[ea * n + f], nl = D[l * n + eb];
-            if (o.requireShorter && !(realHere - (nf + length + nl - dab) > EPS)) continue;
-            const gain = costHere - cost(nf, length, nl, dab, L);
-            if (gain > EPS && gain > bestGain) { bestGain = gain; best = { gain, i, L, j, rev: !!rev }; }
-          }
+function pickBest(pairs, order) {
+  let pick = pairs[0];
+  for (const x of pairs) if (order === "best" ? x[2] < pick[2] : x[2] > pick[2]) pick = x;
+  return pick;
+}
+
+function describeAgreed(ctx, ag) {
+  const { n, D, cost, first, last, arcLen, kPts } = ctx;
+  return ag.pairs.map(([ci, e, met]) => ({
+    chain: ctx.chainOf(ci), edge: e, metric: met,
+    cost: cost(D[ag.T[e] * n + first[ci]], arcLen[ci], D[last[ci] * n + ag.Bn[e]], ag.Dab[e], kPts[ci]),
+  }));
+}
+
+/** Splice chain ci into edge e. Mutates st; returns the adoption event (without tourAfter). */
+function applyAdopt(ctx, st, ag, agreedDesc, pick, stepI) {
+  const [ci, e, met] = pick;
+  const { n, D, cost, first, last, arcLen, kPts } = ctx;
+  const tour = st.tour, m = tour.length, ch = ctx.chainOf(ci);
+  const ev = {
+    type: "adopt", step: stepI, chain: ch, edge: e, a: tour[e], c: tour[(e + 1) % m],
+    cost: cost(D[ag.T[e] * n + first[ci]], arcLen[ci], D[last[ci] * n + ag.Bn[e]], ag.Dab[e], kPts[ci]),
+    metric: met, agreed: agreedDesc,
+  };
+  st.tour = tour.slice(0, e + 1).concat(ch, tour.slice(e + 1));
+  for (const p of ch) { st.adopted[p] = 1; st.lastChange[p] = stepI; st.remaining--; }
+  const keep = [];
+  for (let t = 0; t < st.alive.length; t++) {
+    const c = st.alive[t];
+    let ok = true;
+    for (let q = 0; q < ctx.chainLen[c]; q++) if (st.adopted[ctx.chainPts[ctx.chainStart[c] + q]]) { ok = false; break; }
+    if (ok) keep.push(c);
+  }
+  st.alive = Int32Array.from(keep);
+  ev.tourAfter = st.tour.slice();
+  return ev;
+}
+
+/** The single best re-adoption move (lift a point/arc out, re-adopt it into another edge). Applies it to st. */
+function bestReadopt(ctx, st, stepI) {
+  const { n, D, cost, isHull, arcMax } = ctx, o = ctx.o;
+  const tour = st.tour, m = tour.length, lastChange = st.lastChange;
+  const movable = new Uint8Array(m);
+  for (let i = 0; i < m; i++) movable[i] = !isHull[tour[i]] && lastChange[tour[i]] < stepI ? 1 : 0;
+  let best = null, bestGain = 0;
+  const rest = new Int32Array(m);
+  for (let i = 0; i < m; i++) {
+    let length = 0;
+    for (let L = 1; L <= arcMax; L++) {
+      if (m - L < 3 || !movable[(i + L - 1) % m]) break;
+      const a0 = tour[i], aL = tour[(i + L - 1) % m];
+      if (L > 1) length += D[tour[(i + L - 2) % m] * n + aL];
+      const u = tour[(i - 1 + m) % m], w = tour[(i + L) % m];
+      const costHere = cost(D[u * n + a0], length, D[aL * n + w], D[u * n + w], L);
+      const realHere = D[u * n + a0] + length + D[aL * n + w] - D[u * n + w];
+      const rl = m - L;                                  // the tour without the arc: w ... u
+      for (let q = 0; q < rl; q++) rest[q] = tour[(i + L + q) % m];
+      for (let rev = 0; rev < (L > 1 ? 2 : 1); rev++) {
+        const f = rev ? aL : a0, l = rev ? a0 : aL;
+        for (let j = 0; j < rl - 1; j++) {
+          const ea = rest[j], eb = rest[j + 1];
+          const dab = D[ea * n + eb], nf = D[ea * n + f], nl = D[l * n + eb];
+          if (o.requireShorter && !(realHere - (nf + length + nl - dab) > EPS)) continue;
+          const gain = costHere - cost(nf, length, nl, dab, L);
+          if (gain > EPS && gain > bestGain) { bestGain = gain; best = { gain, i, L, j, rev: !!rev }; }
         }
       }
     }
-    if (!best) return null;
-    const { gain, i, L, j, rev } = best;
-    const arc = [];
-    for (let q = 0; q < L; q++) arc.push(tour[(i + q) % m]);
-    const u = tour[(i - 1 + m) % m], w = tour[(i + L) % m];
-    const restArr = [];
-    for (let q = 0; q < m - L; q++) restArr.push(tour[(i + L + q) % m]);
-    const placed = rev ? arc.slice().reverse() : arc;
-    const before = tour;
-    tour = restArr.slice(0, j + 1).concat(placed, restArr.slice(j + 1));
-    for (const p of arc) lastChange[p] = stepI;
-    return { type: "readopt", step: stepI, arc, placed, u, w, a: restArr[j], b: restArr[j + 1], net: gain, tourBefore: before, tourAfter: tour.slice() };
   }
+  if (!best) return null;
+  const { gain, i, L, j, rev } = best;
+  const arc = [];
+  for (let q = 0; q < L; q++) arc.push(tour[(i + q) % m]);
+  const u = tour[(i - 1 + m) % m], w = tour[(i + L) % m];
+  const restArr = [];
+  for (let q = 0; q < m - L; q++) restArr.push(tour[(i + L + q) % m]);
+  const placed = rev ? arc.slice().reverse() : arc;
+  st.tour = restArr.slice(0, j + 1).concat(placed, restArr.slice(j + 1));
+  for (const p of arc) lastChange[p] = stepI;
+  return { type: "readopt", step: stepI, arc, placed, u, w, a: restArr[j], b: restArr[j + 1], net: gain, tourBefore: tour, tourAfter: st.tour.slice() };
+}
 
-  /* ---- run ---- */
+function readoptAll(ctx, st, stepI, batch) {
+  if (ctx.o.readopt) for (let mv; (mv = bestReadopt(ctx, st, stepI)); ) batch.push(mv);
+}
+
+const clock = () => (typeof performance !== "undefined" ? performance : Date).now();
+
+function finish(ctx, events, tour, t0, extra = {}) {
+  const { n, D } = ctx;
+  return {
+    events, hull: ctx.hull, tour, n,
+    length: tourLength(D, n, tour), hullLength: tourLength(D, n, ctx.hull),
+    ms: clock() - t0, chains: ctx.C, arcMaxUsed: ctx.arcMaxUsed, arcMaxAsked: ctx.arcMax, capped: ctx.capped,
+    adoptions: events.filter((e) => e.type === "adopt").length,
+    readoptions: events.filter((e) => e.type === "readopt").length,
+    ...extra,
+  };
+}
+
+/** Greedy construction: always take the cheapest agreed pair. (Dispatches to beam search when beamWidth > 1.) */
+export function construct(P, n, userOpts = {}) {
+  if ((userOpts.beamWidth | 0) > 1) return constructBeam(P, n, userOpts);
+  const t0 = clock();
+  const ctx = makeContext(P, n, userOpts);
+  const st = newState(ctx);
   const events = [];
   let stepI = 0;
   while (stepI < 3 * n + 30) {
     const batch = [];
-    if (remaining > 0) batch.push(adoptStep(stepI));
-    if (o.readopt) for (let mv; (mv = bestReadopt(stepI)); ) batch.push(mv);
+    if (st.remaining > 0) {
+      const ag = agreedPairs(ctx, st);
+      const pick = pickBest(ag.pairs, ctx.o.order);
+      batch.push(applyAdopt(ctx, st, ag, describeAgreed(ctx, ag), pick, stepI));
+    }
+    readoptAll(ctx, st, stepI, batch);
     if (!batch.length) break;
     events.push(...batch);
     stepI++;
   }
-  const now = (typeof performance !== "undefined" ? performance : Date).now();
-  return {
-    events, hull, tour, n,
-    length: tourLength(D, n, tour), hullLength: tourLength(D, n, hull),
-    ms: now - t0, chains: C, arcMaxUsed, arcMaxAsked: arcMax, capped: cappedAt > 0,
-    adoptions: events.filter((e) => e.type === "adopt").length,
-    readoptions: events.filter((e) => e.type === "readopt").length,
-  };
+  return finish(ctx, events, st.tour, t0);
+}
+
+/* ------------------------------------------------------------------ beam search
+   Keep the `beamWidth` best partial tours. Every state forks into its `branch` cheapest agreed pairs;
+   children are scored by tour length plus the cheapest-insertion cost of every point still outside,
+   duplicates (same set of edges) are dropped, and the best `beamWidth` survive to the next step.
+   beamWidth 1 with branch 1 is exactly the greedy construction. */
+function mix32(x) {
+  x = Math.imul(x ^ (x >>> 16), 0x45d9f3b); x = Math.imul(x ^ (x >>> 16), 0x45d9f3b);
+  return (x ^ (x >>> 16)) >>> 0;
+}
+function tourKey(tour) {
+  let s1 = 0, s2 = 0;
+  for (let k = 0; k < tour.length; k++) {
+    const a = tour[k], b = tour[(k + 1) % tour.length];
+    const e = a < b ? a * 65536 + b : b * 65536 + a;
+    s1 = (s1 + mix32(e)) >>> 0; s2 = (s2 + mix32(e ^ 0x9e3779b9)) >>> 0;
+  }
+  return s1 * 4294967296 + s2;
+}
+function insertionEstimate(ctx, st) {
+  const { n, D } = ctx, tour = st.tour, m = tour.length;
+  let sum = 0;
+  for (let p = 0; p < n; p++) {
+    if (st.adopted[p]) continue;
+    let best = Infinity;
+    for (let e = 0; e < m; e++) {
+      const a = tour[e], b = tour[(e + 1) % m];
+      const d = D[a * n + p] + D[p * n + b] - D[a * n + b];
+      if (d < best) best = d;
+    }
+    sum += best;
+  }
+  return sum;
+}
+
+export function constructBeam(P, n, userOpts = {}) {
+  const t0 = clock();
+  const ctx = makeContext(P, n, userOpts);
+  const B = Math.max(1, ctx.o.beamWidth | 0), K = Math.max(1, ctx.o.branch | 0);
+  const lengthOf = (tour) => tourLength(ctx.D, n, tour);
+  const alpha = ctx.o.estimateWeight;
+  const score = (st) => lengthOf(st.tour) + (st.remaining > 0 ? alpha * insertionEstimate(ctx, st) : 0);
+  let beam = [{ st: newState(ctx), path: null, done: false, score: 0 }];
+  let explored = 1, stepI = 0, peak = 1;
+
+  while (stepI < 3 * n + 30) {
+    const next = [], seen = new Set();
+    const push = (c) => { const key = tourKey(c.st.tour) + (c.done ? 0.5 : 0); if (seen.has(key)) return; seen.add(key); next.push(c); };
+    for (const b of beam) {
+      if (b.done) { push(b); continue; }
+      if (b.st.remaining > 0) {
+        const ag = agreedPairs(ctx, b.st), desc = describeAgreed(ctx, ag);
+        const ranked = ag.pairs.slice().sort((x, y) => (ctx.o.order === "best" ? x[2] - y[2] : y[2] - x[2]) || x[1] - y[1]).slice(0, K);
+        for (const pick of ranked) {
+          const st = cloneState(b.st);
+          const batch = [applyAdopt(ctx, st, ag, desc, pick, stepI)];
+          readoptAll(ctx, st, stepI, batch);
+          explored++;
+          push({ st, path: { evs: batch, parent: b.path }, done: false, score: score(st) });
+        }
+      } else {
+        const st = cloneState(b.st), batch = [];
+        readoptAll(ctx, st, stepI, batch);
+        if (!batch.length) { push({ ...b, done: true }); continue; }
+        explored++;
+        push({ st, path: { evs: batch, parent: b.path }, done: false, score: score(st) });
+      }
+    }
+    peak = Math.max(peak, next.length);
+    next.sort((a, b) => a.score - b.score);
+    beam = next.slice(0, B);
+    if (beam.every((c) => c.done)) break;
+    stepI++;
+  }
+
+  const finished = beam.filter((c) => c.st.remaining === 0);
+  const pool = finished.length ? finished : beam;
+  const winner = pool.reduce((a, b) => (lengthOf(b.st.tour) < lengthOf(a.st.tour) ? b : a));
+  const chain = [];
+  for (let p = winner.path; p; p = p.parent) chain.push(p.evs);
+  const events = chain.reverse().flat();
+  return finish(ctx, events, winner.st.tour, t0, {
+    beam: { width: B, branch: K, explored, finalists: pool.length, spread: pool.length > 1 ? (lengthOf(pool[pool.length - 1].st.tour) / lengthOf(winner.st.tour) - 1) * 100 : 0 },
+  });
 }
 
 /* ------------------------------------------------------------------ browser reference solver
