@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TSP Visualiser</title>
+<meta name="description" content="Watch a travelling salesman tour grow inward from the convex hull, one agreed move at a time. Click to place your own points.">
+<meta property="og:title" content="TSP Visualiser">
+<meta property="og:description" content="A travelling salesman tour built by mutual agreement between points and edges, drawn live in WebGL.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23131b36'/%3E%3Cpath d='M7 22 13 9l7 9 5-11' fill='none' stroke='%23ffc21a' stroke-width='2.4' stroke-linejoin='round'/%3E%3Ccircle cx='7' cy='22' r='2.6' fill='%23fff'/%3E%3Ccircle cx='13' cy='9' r='2.6' fill='%23fff'/%3E%3Ccircle cx='20' cy='18' r='2.6' fill='%23fff'/%3E%3Ccircle cx='25' cy='7' r='2.6' fill='%23fff'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,200..800&family=Literata:ital,opsz,wght@0,7..72,400..700;1,7..72,400..600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<main class="stage" id="top">
+  <section class="plot" id="plot" aria-label="Tour animation">
+    <canvas id="gl"></canvas>
+    <canvas id="labels" aria-hidden="true"></canvas>
+
+    <header class="hud-title">
+      <h1>TSP Visualiser</h1>
+      <p>A tour grows inward from the convex hull. Points and edges each pick a favourite; only mutual picks get adopted.</p>
+    </header>
+    <nav class="hud-links" aria-label="Page sections">
+      <a href="#how">How it works</a>
+      <a href="#compare">Numbers</a>
+      <a href="https://github.com/prat8897/tsp-visualiser">Source</a>
+    </nav>
+
+    <p class="caption" id="caption" aria-live="polite"></p>
+    <div class="nogl" id="nogl" hidden>
+      <p><strong>WebGL isn't available in this browser.</strong> Turn on hardware acceleration, or try a current version of Chrome, Firefox, Safari or Edge.</p>
+    </div>
+  </section>
+
+  <aside class="panel" aria-label="Controls">
+    <dl class="readout">
+      <div class="wide"><dt>Tour length</dt><dd id="sLen" class="big">-</dd></div>
+      <div><dt>Step</dt><dd id="sStep">-</dd></div>
+      <div><dt>Convex hull</dt><dd id="sHull">-</dd></div>
+      <div><dt>Built in</dt><dd id="sBuilt">-</dd></div>
+      <div><dt>Moves</dt><dd id="sMoves">-</dd></div>
+      <div class="wide"><dt>Reference search</dt><dd id="sRef">-</dd></div>
+      <div><dt>This tour is</dt><dd id="sGap">-</dd></div>
+      <div><dt>Shared edges</dt><dd id="sShared">-</dd></div>
+    </dl>
+    <p class="warn" id="warn" hidden></p>
+
+    <div class="playback" role="group" aria-label="Playback">
+      <button id="back" class="icon" aria-label="Step back" title="Step back (left arrow)"><svg viewBox="0 0 24 24"><path d="M7 5v14M19 5 9 12l10 7z"/></svg></button>
+      <button id="play" class="icon primary" aria-label="Pause" title="Play or pause (space)" data-state="playing">
+        <svg class="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></svg>
+        <svg class="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5z"/></svg>
+      </button>
+      <button id="fwd" class="icon" aria-label="Step forward" title="Step forward (right arrow)"><svg viewBox="0 0 24 24"><path d="M17 5v14M5 5l10 7-10 7z"/></svg></button>
+      <button id="replay" class="text" title="Restart (R)">Replay</button>
+      <button id="instant" class="text" title="Jump to the finished tour">Solve instantly</button>
+    </div>
+    <label class="slider">
+      <span>Progress</span>
+      <input id="scrub" type="range" min="0" max="0" step="1" value="0">
+    </label>
+    <label class="slider">
+      <span>Speed <output id="speedLabel"></output></span>
+      <input id="speed" type="range" min="0" max="100" step="1" value="40">
+    </label>
+
+    <fieldset class="group">
+      <legend>Points</legend>
+      <label class="field"><span>Layout</span>
+        <select id="kind"></select>
+      </label>
+      <label class="slider">
+        <span>How many <output id="nLabel"></output></span>
+        <input id="n" type="range" min="5" max="250" step="1" value="40">
+      </label>
+      <div class="row">
+        <label class="field grow"><span>Seed</span><input id="seed" type="number" inputmode="numeric" step="1"></label>
+        <button id="shuffle" class="text">New points</button>
+        <button id="clear" class="text">Clear</button>
+      </div>
+      <div class="seg" role="group" aria-label="Edit points on the sheet">
+        <span class="seg-label">Edit on sheet</span>
+        <button data-edit="off" aria-pressed="false">Off</button>
+        <button data-edit="add" aria-pressed="false" title="Click to add a point, drag to move one">Add and move</button>
+        <button data-edit="remove" aria-pressed="false" title="Click a point to remove it">Remove</button>
+      </div>
+      <p class="hint">With editing on, click empty space to add a point and drag any point to move it. The tour re-solves as you drag. Shift-click or right-click removes a point.</p>
+    </fieldset>
+
+    <details class="group" open>
+      <summary>Algorithm</summary>
+      <label class="field"><span>What counts as cheap</span><select id="cost"></select></label>
+      <label class="slider">
+        <span>Longest arc <output id="arcLabel"></output> points</span>
+        <input id="arc" type="range" min="1" max="8" step="1" value="4">
+      </label>
+      <label class="check"><input id="readopt" type="checkbox" checked><span>Re-adopt points that fit better elsewhere</span></label>
+      <label class="field"><span>Adopt first</span>
+        <select id="order"><option value="best">The cheapest agreed pair</option><option value="worst">The most expensive agreed pair</option></select>
+      </label>
+      <label class="field"><span>Compare candidates by</span>
+        <select id="rank"><option value="per_point">Cost per point adopted</option><option value="total">Total cost</option></select>
+      </label>
+      <label class="slider">
+        <span>Arc neighbours <output id="knnLabel"></output></span>
+        <input id="knn" type="range" min="3" max="10" step="1" value="6">
+      </label>
+    </details>
+
+    <details class="group">
+      <summary>View</summary>
+      <label class="check"><input id="forces" type="checkbox" checked><span>Show the two forces before each adoption</span></label>
+      <label class="check"><input id="numbers" type="checkbox" checked><span>Number the points (up to 60)</span></label>
+      <label class="check"><input id="compare" type="checkbox" checked><span>Colour edges that the reference tour also uses</span></label>
+      <label class="check"><input id="showRef" type="checkbox"><span>Draw the reference tour underneath</span></label>
+    </details>
+
+    <details class="group">
+      <summary>How to read the picture</summary>
+      <ul class="legend">
+        <li><i class="sw" style="--c:#131b36"></i>Tour edge</li>
+        <li><i class="sw" style="--c:#0e9f72"></i>Tour edge the reference also uses</li>
+        <li><i class="sw arrow" style="--c:#2340ff"></i>Inside-out: a candidate points at its favourite edge</li>
+        <li><i class="sw arrow" style="--c:#f59e0b"></i>Outside-in: an edge points at its favourite candidate</li>
+        <li><i class="sw dash" style="--c:#ec3d2a"></i>The move about to happen</li>
+        <li><i class="sw dash" style="--c:#7c3aed"></i>Re-adoption: the edges an arc left behind</li>
+        <li><i class="dot" style="--c:#ffc21a"></i>Just adopted</li>
+        <li><i class="dot" style="--c:#b83fd1"></i>Just re-adopted</li>
+        <li><i class="dot hollow"></i>Not in the tour yet</li>
+      </ul>
+    </details>
+  </aside>
+</main>
+
+<article class="prose" id="how">
+  <h2>The problem</h2>
+  <p>A courier has to stop at every point once and finish where they started, driving as little as possible. That is the travelling salesman problem. It sounds small until you count the routes: 10 points allow about 181,000 distinct loops, 20 allow about 6 &times; 10<sup>16</sup>, and 120 allow roughly 10<sup>196</sup>.</p>
+  <p>Nobody checks them all. Exact solvers prune the search cleverly, but when you want a good tour right now you build one with a heuristic and accept that it might be a little longer than the best possible loop.</p>
+
+  <h2>How the tour grows</h2>
+  <div class="split">
+    <div>
+      <p>The tour starts as the convex hull: the rubber-band loop around the outside of the points. Everything else has to be pulled in. Instead of visiting points in some fixed order, the algorithm lets points and edges negotiate.</p>
+      <ol class="steps">
+        <li>Every <b>candidate</b> looks at every edge of the tour and picks the one it would stretch least. A candidate is a single point or an <b>arc</b>: a chain of up to a few nearby points.</li>
+        <li>Every <b>edge</b> looks at every candidate and picks the one that would stretch it least.</li>
+        <li>A pair is allowed only when the choices agree. The cheapest allowed pair is adopted: the edge breaks and the candidate is spliced in.</li>
+        <li>Repeat until every point is in the tour.</li>
+      </ol>
+    </div>
+    <figure class="fig">
+      <svg viewBox="0 0 320 230" role="img" aria-label="A candidate point above a tour edge, with a blue arrow from the point and an amber arrow from the edge meeting in the middle">
+        <line x1="40" y1="180" x2="280" y2="180" stroke="#131b36" stroke-width="3.4" stroke-linecap="round"/>
+        <circle cx="40" cy="180" r="7" fill="#131b36"/><circle cx="280" cy="180" r="7" fill="#131b36"/>
+        <text x="40" y="208" text-anchor="middle" class="fig-t">a</text><text x="280" y="208" text-anchor="middle" class="fig-t">b</text>
+        <circle cx="170" cy="46" r="7" fill="#fff" stroke="#131b36" stroke-width="2"/>
+        <text x="188" y="42" class="fig-t">c</text>
+        <line x1="170" y1="58" x2="170" y2="104" stroke="#2340ff" stroke-width="3.2" stroke-linecap="round"/>
+        <path d="M170 116 160 98h20z" fill="#2340ff"/>
+        <line x1="170" y1="172" x2="170" y2="128" stroke="#f59e0b" stroke-width="3.2" stroke-linecap="round"/>
+        <path d="M170 116 160 134h20z" fill="#f59e0b"/>
+        <text x="190" y="90" class="fig-t blue">c picks edge a-b</text>
+        <text x="190" y="156" class="fig-t amber">a-b picks c</text>
+      </svg>
+      <figcaption>Both arrows meet, so c may be adopted into a-b. Its cost is the detour: distance from a to c, plus c to b, minus a to b.</figcaption>
+    </figure>
+  </div>
+  <p>There are no crossing tests, no inside-the-polygon tests and no area calculations anywhere. The only geometry is the starting hull. Every decision comes from one cost function, so changing what &ldquo;cheap&rdquo; means changes the whole behaviour. Arcs are compared per point, which lets a tidy chain of three points beat a lone point that merely fits.</p>
+
+  <h2>Second thoughts</h2>
+  <p>After each adoption, points and arcs adopted in <em>earlier</em> steps can be lifted back out and re-adopted into a different edge, in either direction, as long as the real tour gets shorter. A point moves at most once per step and hull points never move. When everything is adopted the same loop keeps running as a polish until nothing improves.</p>
+  <p>On screen, the edges an arc leaves behind flash purple and the arc itself turns orchid.</p>
+
+  <h2>Change what &ldquo;cheap&rdquo; means</h2>
+  <p>The cost function is the only thing the construction cares about. Swap it under Algorithm, or start from one of these:</p>
+  <ul class="presets">
+    <li><a href="#" data-preset='{"kind":"random","n":60,"seed":3,"cost":"log"}'>Compressed detour, 60 points</a></li>
+    <li><a href="#" data-preset='{"kind":"random","n":60,"seed":3,"cost":"detour","readopt":false}'>No re-adoption, 60 points</a></li>
+    <li><a href="#" data-preset='{"kind":"random","n":60,"seed":3,"cost":"detour","arc":1,"readopt":true}'>Single points only</a></li>
+    <li><a href="#" data-preset='{"kind":"clusters","n":120,"seed":4,"cost":"detour","arc":4}'>120 points in clusters</a></li>
+    <li><a href="#" data-preset='{"kind":"messy12","n":12,"seed":1,"cost":"detour","arc":5}'>The 12-point messy set</a></li>
+  </ul>
+
+  <h2 id="compare">How it compares</h2>
+  <p>I ran the construction on 8 random instances at each size and gave OR-Tools the same points: a path-cheapest-arc start, then guided local search for 3 + n/5 seconds, the settings from the original script. Arcs were limited to 4 points.</p>
+  <div class="table-wrap">
+    <table>
+      <caption class="sr">Adoption tour compared with OR-Tools on 8 random instances per size</caption>
+      <thead><tr><th scope="col">Points</th><th scope="col">Average length vs OR-Tools</th><th scope="col">Shorter / equal</th><th scope="col">Adoption tour</th><th scope="col">OR-Tools</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">30</th><td>+1.17%</td><td>0 / 2 of 8</td><td>9 ms</td><td>9 s</td></tr>
+        <tr><th scope="row">60</th><td>0.00%</td><td>3 / 1 of 8</td><td>31 ms</td><td>15 s</td></tr>
+        <tr><th scope="row">120</th><td>+0.11%</td><td>4 / 0 of 8</td><td>211 ms</td><td>27 s</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>So the tour lands within about 1% of a strong solver in a fraction of a second, and at 120 points it was shorter than OR-Tools on half the instances. It does not always win: at 30 points OR-Tools matched or beat it every time. This is one run per instance on one machine, not a rigorous study.</p>
+  <p>The reference inside the visualiser is a different and, in this test, stronger baseline. OR-Tools can't run in a browser, so the page runs a 2-opt and Or-opt iterated search for a second or two instead. It beat OR-Tools on all 8 of the 120-point instances, which is why the gap shown beside the tour is often positive.</p>
+
+  <h2>Run it yourself</h2>
+  <p>Everything is static files: <code>index.html</code>, a stylesheet and four modules in <code>js/</code>, with no build step. Serve the folder with <code>python3 -m http.server</code> and open <code>localhost:8000</code>. The original Python script, with its matplotlib animation and OR-Tools comparison, lives in <code>tests/</code> next to the scripts that check the JavaScript port against it and produced the table above.</p>
+</article>
+
+<footer class="foot">
+  <p>Algorithm and original Python script by <a href="https://github.com/prat8897">prat8897</a>. This page is a WebGL port.</p>
+</footer>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
