@@ -11,8 +11,6 @@ const COL = {
   refUnder: hex("#ffc46b", 0.6), gold: hex("#ffc21a"),
 };
 const MIN_POINTS = 4, MAX_POINTS = 250;
-// race order: slowest runs first, so the pool finishes as early as it can
-const RACE_ORDER = ["detourRatio", "squared", "keepLong", "log", "relative", "stretch", "nearEnds", "sqrt", "perPoint", "detour"];
 
 const $ = (id) => document.getElementById(id);
 const el = {
@@ -23,8 +21,9 @@ const el = {
   edit: $("edit"),
   cost: $("cost"), arc: $("arc"), arcLabel: $("arcLabel"), readopt: $("readopt"), order: $("order"), rank: $("rank"),
   knn: $("knn"), knnLabel: $("knnLabel"),
+  beam: $("beam"), beamLabel: $("beamLabel"), branch: $("branch"), branchLabel: $("branchLabel"), look: $("look"), lookLabel: $("lookLabel"),
   sSearch: $("sSearch"),
-  raceOn: $("raceOn"), raceList: $("raceList"), raceBox: $("raceBox"), forces: $("forces"), numbers: $("numbers"), compare: $("compare"), showRef: $("showRef"),
+  forces: $("forces"), numbers: $("numbers"), compare: $("compare"), showRef: $("showRef"),
   sLen: $("sLen"), sStep: $("sStep"), sHull: $("sHull"), sBuilt: $("sBuilt"), sRef: $("sRef"), sGap: $("sGap"), sShared: $("sShared"),
   sMoves: $("sMoves"), warn: $("warn"),
 };
@@ -37,11 +36,10 @@ function autoArc(n) { return n <= 40 ? 5 : n <= 150 ? 4 : 3; }
 
 const S = {
   kind: "random", n: 40, seed: 7, P: null,
-  opts: { ...DEFAULTS, arcMax: autoArc(40) },
+  opts: { ...DEFAULTS, arcMax: autoArc(40), branch: 3 },
   result: null, ref: null, refEdges: null,
   t: 0, playing: true, rate: 4,
   showForces: true, showNumbers: true, compare: true, showRef: false,
-  raceOn: true, race: null,
   editMode: fine ? "add" : "off", drag: -1, solving: false,
   view: { scale: 1, ox: 0, oy: 0, w: 1, h: 1 },
   hullSet: null,
@@ -52,7 +50,6 @@ let token = 0;
 class Engine {
   constructor() {
     this.worker = null; this.refWorker = null; this.busy = false; this.pending = null; this.id = 0;
-    this.pool = null; this.cur = null; this.raceId = 0; this.canPool = true;
     this._makeWorker();
   }
   _makeWorker() {
@@ -63,8 +60,14 @@ class Engine {
   }
   solve(P, n, opts) {
     return new Promise((resolve) => {
-      const job = { id: ++this.id, P, n, opts, resolve };
-      if (this.busy) { if (this.pending) this.pending.resolve(null); this.pending = job; } else this._run(job);
+      const job = { id: ++this.id, P, n, opts, resolve, heavy: (opts.beamWidth | 0) > 1 };
+      if (this.busy && this.worker && this.current && this.current.heavy) {
+        // a long beam search is running: throw it away instead of waiting for it
+        this.worker.terminate(); this._makeWorker();
+        this.current.resolve(null); this.current = null; this.busy = false;
+        if (this.pending) { this.pending.resolve(null); this.pending = null; }
+        this._run(job);
+      } else if (this.busy) { if (this.pending) this.pending.resolve(null); this.pending = job; } else this._run(job);
     });
   }
   _run(job, retry = false) {
@@ -85,78 +88,6 @@ class Engine {
       }, 0);
     }
   }
-
-  /* ---- race: one greedy run per cost function, spread over a pool of workers ---- */
-  race(P, n, opts, keys) {
-    if (this.cur) this._killPool();                     // a newer request replaces a race still running
-    const cur = { id: ++this.raceId, P, n, opts, keys, queue: keys.slice(), results: [], outstanding: 0, t0: performance.now(), resolve: null };
-    this.cur = cur;
-    return new Promise((resolve) => {
-      cur.resolve = resolve;
-      const size = Math.min(keys.length, Math.max(1, Math.min(8, (navigator.hardwareConcurrency || 4) - 1)));
-      if (!this.canPool || !this._ensurePool(size)) { this._raceSequential(cur); return; }
-      cur.workers = this.pool.length;
-      for (const w of this.pool) this._feed(w, cur);
-    });
-  }
-  _ensurePool(size) {
-    if (this.pool && this.pool.length >= size) return true;
-    this._killPoolWorkers();
-    this.pool = [];
-    for (let i = 0; i < size; i++) {
-      let w;
-      try { w = new Worker(new URL("./worker.js", import.meta.url), { type: "module" }); }
-      catch { this.canPool = false; this._killPoolWorkers(); return false; }
-      w.onmessage = (e) => this._raceMsg(w, e);
-      w.onerror = () => this._raceFail();
-      this.pool.push(w);
-    }
-    return true;
-  }
-  _feed(w, cur) {
-    const k = cur.queue.shift();
-    if (!k) return;
-    cur.outstanding++; w.task = k;
-    w.postMessage({ type: "construct", id: cur.id, points: cur.P, n: cur.n, opts: { ...cur.opts, cost: k } });
-  }
-  _raceMsg(w, e) {
-    const cur = this.cur;
-    if (!cur || e.data.id !== cur.id) return;
-    cur.outstanding--;
-    if (e.data.type === "built") cur.results.push({ cost: w.task, result: e.data.result });
-    else console.error(e.data.message);
-    if (cur.queue.length) this._feed(w, cur);
-    else if (cur.outstanding === 0) this._raceDone(cur);
-  }
-  _raceDone(cur) {
-    if (this.cur !== cur) return;
-    this.cur = null;
-    cur.resolve({ results: cur.results, wall: performance.now() - cur.t0, workers: cur.workers || 1 });
-  }
-  _raceFail() {                                         // workers unavailable: run the same race on the main thread
-    this.canPool = false;
-    const cur = this.cur;
-    this._killPoolWorkers();
-    if (cur) this._raceSequential(cur);
-  }
-  _raceSequential(cur) {
-    cur.results = []; cur.queue = cur.keys.slice(); cur.workers = 1;
-    const step = () => {
-      if (this.cur !== cur) return;
-      const k = cur.queue.shift();
-      if (!k) return this._raceDone(cur);
-      try { cur.results.push({ cost: k, result: construct(cur.P, cur.n, { ...cur.opts, cost: k }) }); } catch (err) { console.error(err); }
-      setTimeout(step, 0);
-    };
-    setTimeout(step, 0);
-  }
-  _killPoolWorkers() { if (this.pool) { for (const w of this.pool) w.terminate(); this.pool = null; } }
-  _killPool() {
-    const cur = this.cur; this.cur = null;
-    this._killPoolWorkers();
-    if (cur && cur.resolve) cur.resolve(null);
-  }
-
   reference(P, n, budgetMs) {
     if (this.refWorker) { this.refWorker.terminate(); this.refWorker = null; }
     return new Promise((resolve) => {
@@ -179,26 +110,10 @@ async function solve({ animate }) {
   S.live = false;
   const n = S.P.length / 2;
   S.ref = null; S.refEdges = null;
-  if (n < MIN_POINTS) { S.result = null; S.race = null; S.solving = false; renderRaceList(); updateAll(); return; }
+  if (n < MIN_POINTS) { S.result = null; S.solving = false; updateAll(); return; }
   S.solving = true; updateAll();
-  let result, race = null;
-  if (S.raceOn) {
-    const r = await engine.race(S.P, n, { ...S.opts }, RACE_ORDER.filter((k) => COSTS[k]));
-    if (my !== token || !r) return;
-    const entries = r.results.filter((x) => x.result).sort((a, b) => a.result.length - b.result.length);
-    if (!entries.length) return;
-    race = { entries, wall: r.wall, workers: r.workers, selected: 0 };
-    result = entries[0].result;
-  } else {
-    result = await engine.solve(S.P, n, { ...S.opts });
-    if (my !== token || !result) return;
-  }
-  S.race = race; renderRaceList();
-  showResult(result, animate);
-  if (!S.live) requestReference(my, n);
-}
-
-function showResult(result, animate) {
+  const result = await engine.solve(S.P, n, { ...S.opts });
+  if (my !== token || !result) return;
   S.result = result; S.solving = false;
   S.hullSet = new Set(result.hull);
   const E = result.events.length;
@@ -212,6 +127,7 @@ function showResult(result, animate) {
     S.t = E; S.playing = false;
   }
   updateAll();
+  if (!S.live) requestReference(my, n);
 }
 
 function requestReference(my, n) {
@@ -229,10 +145,10 @@ function solveLive() {            // while dragging a point: show the finished t
   const my = ++token;
   const n = S.P.length / 2;
   if (n < MIN_POINTS) return;
-  engine.solve(S.P, n, { ...S.opts }).then((result) => {
+  engine.solve(S.P, n, { ...S.opts, beamWidth: 1 }).then((result) => {
     if (my !== token || !result) return;
     S.result = result; S.hullSet = new Set(result.hull);
-    S.t = result.events.length; S.playing = false; S.ref = null; S.refEdges = null; S.race = null; renderRaceList();
+    S.t = result.events.length; S.playing = false; S.ref = null; S.refEdges = null;
     el.scrub.max = String(result.events.length * 2);
     updateAll();
   });
@@ -259,7 +175,9 @@ function syncControls() {
   el.cost.value = S.opts.cost; el.arc.value = String(S.opts.arcMax); el.arcLabel.textContent = String(S.opts.arcMax);
   el.readopt.checked = S.opts.readopt; el.order.value = S.opts.order; el.rank.value = S.opts.rankBy;
   el.knn.value = String(S.opts.knn); el.knnLabel.textContent = String(S.opts.knn);
-  el.raceOn.checked = S.raceOn; el.cost.disabled = S.raceOn;
+  el.beam.value = String(S.opts.beamWidth); el.beamLabel.textContent = S.opts.beamWidth === 1 ? "1 (greedy)" : String(S.opts.beamWidth);
+  el.branch.value = String(S.opts.branch); el.branchLabel.textContent = String(S.opts.branch);
+  el.look.value = String(S.opts.estimateWeight); el.lookLabel.textContent = String(S.opts.estimateWeight);
   el.numbers.checked = S.showNumbers; el.compare.checked = S.compare; el.showRef.checked = S.showRef;
   for (const b of document.querySelectorAll("[data-edit]")) b.setAttribute("aria-pressed", String(b.dataset.edit === S.editMode));
   el.plot.dataset.edit = S.editMode;
@@ -268,6 +186,7 @@ function syncControls() {
 function writeHash() {
   if (S.kind === "custom") { history.replaceState(null, "", location.pathname + location.search); return; }
   const h = new URLSearchParams({ kind: S.kind, n: String(S.n), seed: String(S.seed), arc: String(S.opts.arcMax), cost: S.opts.cost });
+  if (S.opts.beamWidth > 1) { h.set("beam", String(S.opts.beamWidth)); h.set("branch", String(S.opts.branch)); }
   history.replaceState(null, "", "#" + h.toString());
 }
 
@@ -280,6 +199,8 @@ function readHash() {
   S.arcTouched = arc >= 1 && arc <= 8;
   S.opts.arcMax = S.arcTouched ? arc : autoArc(S.n);
   if (COSTS[h.get("cost")]) S.opts.cost = h.get("cost");
+  const bw = parseInt(h.get("beam")); if (bw >= 1 && bw <= 32) S.opts.beamWidth = bw;
+  const br = parseInt(h.get("branch")); if (br >= 1 && br <= 4) S.opts.branch = br;
 }
 
 function bindControls() {
@@ -301,7 +222,9 @@ function bindControls() {
   el.cost.onchange = () => { S.opts.cost = el.cost.value; opt(); };
   el.arc.oninput = () => { S.arcTouched = true; el.arcLabel.textContent = el.arc.value; later(() => { S.opts.arcMax = +el.arc.value; opt(); }); };
   el.knn.oninput = () => { el.knnLabel.textContent = el.knn.value; later(() => { S.opts.knn = +el.knn.value; opt(); }); };
-  el.raceOn.onchange = () => { S.raceOn = el.raceOn.checked; opt(); };
+  el.beam.oninput = () => { el.beamLabel.textContent = el.beam.value === "1" ? "1 (greedy)" : el.beam.value; later(() => { S.opts.beamWidth = +el.beam.value; opt(); }); };
+  el.branch.oninput = () => { el.branchLabel.textContent = el.branch.value; later(() => { S.opts.branch = +el.branch.value; if (S.opts.beamWidth > 1) opt(); }); };
+  el.look.oninput = () => { el.lookLabel.textContent = el.look.value; later(() => { S.opts.estimateWeight = +el.look.value; if (S.opts.beamWidth > 1) opt(); }); };
   el.readopt.onchange = () => { S.opts.readopt = el.readopt.checked; opt(); };
   el.order.onchange = () => { S.opts.order = el.order.value; opt(); };
   el.rank.onchange = () => { S.opts.rankBy = el.rank.value; opt(); };
@@ -336,6 +259,8 @@ function bindControls() {
     if (p.cost) S.opts.cost = p.cost;
     if (p.arc) { S.opts.arcMax = p.arc; S.arcTouched = true; }
     if (p.readopt !== undefined) S.opts.readopt = p.readopt;
+    S.opts.beamWidth = p.beam || 1;
+    if (p.branch) S.opts.branch = p.branch;
     newInstance(p.kind || S.kind, p.n || S.n, p.seed ?? S.seed);
     document.getElementById("top").scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth" });
   };
@@ -377,7 +302,7 @@ function afterEdit() {
   if (n < MIN_POINTS) { S.result = null; S.ref = null; updateAll(); return; }
   solveLive();
   clearTimeout(liveTimer);
-  liveTimer = setTimeout(() => { if (S.P.length / 2 >= MIN_POINTS) solve({ animate: false }); }, 450);
+  liveTimer = setTimeout(() => { S.live = false; const my = token; requestReference(my, S.P.length / 2); }, 450);
   writeHash();
 }
 function bindPointer() {
@@ -548,27 +473,6 @@ function draw() {
   }
 }
 
-/* ============================================================================ race results */
-function renderRaceList() {
-  const R = S.race;
-  el.raceBox.hidden = !R;
-  if (!R) { el.raceList.textContent = ""; return; }
-  const best = R.entries[0].result.length;
-  el.raceList.textContent = "";
-  R.entries.forEach((en, i) => {
-    const li = document.createElement("li");
-    const b = document.createElement("button");
-    b.type = "button"; b.setAttribute("aria-pressed", String(i === R.selected));
-    const name = document.createElement("span"); name.className = "rname"; name.textContent = COSTS[en.cost].label;
-    const len = document.createElement("span"); len.className = "rlen"; len.textContent = en.result.length.toFixed(1);
-    const gap = document.createElement("span"); gap.className = "rgap";
-    gap.textContent = i === 0 ? "shortest" : `+${((en.result.length / best - 1) * 100).toFixed(2)}%`;
-    b.append(name, len, gap);
-    b.onclick = () => { R.selected = i; renderRaceList(); showResult(en.result, true); };
-    li.append(b); el.raceList.append(li);
-  });
-}
-
 /* ============================================================================ text */
 const f1 = (x) => x.toFixed(1);
 let lastCaption = "";
@@ -603,12 +507,9 @@ function updateText() {
     setText(el.sLen, f1(cur));
     setText(el.sStep, F.kind === "final" ? `${E} of ${E}` : `${Math.min(E, Math.floor(S.t))} of ${E}`);
     setText(el.sHull, f1(R.hullLength));
-    const wall = S.race ? S.race.wall : R.ms;
-    setText(el.sBuilt, `${wall < 10 ? wall.toFixed(1) : Math.round(wall)} ms`);
+    setText(el.sBuilt, `${R.ms < 10 ? R.ms.toFixed(1) : Math.round(R.ms)} ms`);
     setText(el.sMoves, `${R.adoptions} adoptions, ${R.readoptions} re-adoptions`);
-    setText(el.sSearch, S.race
-      ? `Raced ${S.race.entries.length} cost functions on ${S.race.workers} worker${S.race.workers > 1 ? "s" : ""}; showing ${COSTS[S.race.entries[S.race.selected].cost].label.toLowerCase()}`
-      : `One greedy run: ${COSTS[S.opts.cost].label.toLowerCase()}`);
+    setText(el.sSearch, R.beam ? `Beam of ${R.beam.width}, ${R.beam.branch} forks per step: ${R.beam.explored.toLocaleString()} partial tours tried` : "Greedy: cheapest agreed pair each step");
     if (S.ref) {
       setText(el.sRef, `${f1(S.ref.length)} in ${(S.ref.ms / 1000).toFixed(1)} s`);
       const g = (R.length / S.ref.length - 1) * 100;

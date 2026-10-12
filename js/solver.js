@@ -24,30 +24,6 @@ export const COSTS = {
     label: "Compressed detour (log)",
     fn: (af, al, lb, ab) => Math.log1p(Math.max(0, af + al + lb - ab)),
   },
-  sqrt: {
-    label: "Square-root detour",
-    fn: (af, al, lb, ab) => Math.sqrt(Math.max(0, af + al + lb - ab)),
-  },
-  relative: {
-    label: "Detour relative to the edge it breaks",
-    fn: (af, al, lb, ab) => (af + al + lb - ab) / ab,
-  },
-  squared: {
-    label: "Squared detour (punish big detours)",
-    fn: (af, al, lb, ab) => { const d = af + al + lb - ab; return d * d; },
-  },
-  stretch: {
-    label: "Stretch: detour over new path length",
-    fn: (af, al, lb, ab) => (af + al + lb - ab) / (af + al + lb),
-  },
-  keepLong: {
-    label: "Detour minus half the broken edge",
-    fn: (af, al, lb, ab) => af + al + lb - 1.5 * ab,
-  },
-  nearEnds: {
-    label: "Detour plus the closer end's distance",
-    fn: (af, al, lb, ab) => af + al + lb - ab + 0.5 * Math.min(af, lb),
-  },
 };
 
 export const DEFAULTS = {
@@ -60,6 +36,9 @@ export const DEFAULTS = {
   readopt: true,
   requireShorter: true,
   maxChains: 400000,     // safety valve: arc enumeration grows fast with arcMax
+  beamWidth: 1,          // > 1 turns on beam search
+  branch: 2,             // beam search: agreed pairs each state forks into
+  estimateWeight: 0,     // beam search: weight of the cheapest-insertion look-ahead for points still outside (0 = compare partial tour length only)
 };
 
 /* ------------------------------------------------------------------ helpers */
@@ -187,7 +166,7 @@ export function makeInstance(kind, n, seed) {
 
 /* ------------------------------------------------------------------ the construction
    Split into a shared context (distances, candidate arcs), a cloneable state, and step helpers,
-   so a run is just newState + repeated steps. */
+   so the same code drives both the single greedy run and the beam search. */
 function makeContext(P, n, userOpts) {
   const o = { ...DEFAULTS, ...userOpts };
   const cost = (COSTS[o.cost] || COSTS.detour).fn;
@@ -268,6 +247,10 @@ function newState(ctx) {
     lastChange: new Int32Array(ctx.n).fill(-1),
     alive: Int32Array.from({ length: ctx.C }, (_, i) => i),     // arcs whose points are all unadopted
   };
+}
+
+function cloneState(s) {
+  return { tour: s.tour.slice(), adopted: s.adopted.slice(), remaining: s.remaining, lastChange: s.lastChange.slice(), alive: s.alive };
 }
 
 /** Both forces for every candidate and edge. Returns the pairs where they agree: [chainIndex, edgeIndex, metric]. */
@@ -397,8 +380,9 @@ function finish(ctx, events, tour, t0, extra = {}) {
   };
 }
 
-/** Greedy construction: always take the cheapest agreed pair. */
+/** Greedy construction: always take the cheapest agreed pair. (Dispatches to beam search when beamWidth > 1.) */
 export function construct(P, n, userOpts = {}) {
+  if ((userOpts.beamWidth | 0) > 1) return constructBeam(P, n, userOpts);
   const t0 = clock();
   const ctx = makeContext(P, n, userOpts);
   const st = newState(ctx);
@@ -417,6 +401,91 @@ export function construct(P, n, userOpts = {}) {
     stepI++;
   }
   return finish(ctx, events, st.tour, t0);
+}
+
+/* ------------------------------------------------------------------ beam search
+   Keep the `beamWidth` best partial tours. Every state forks into its `branch` cheapest agreed pairs;
+   children are scored by tour length plus the cheapest-insertion cost of every point still outside,
+   duplicates (same set of edges) are dropped, and the best `beamWidth` survive to the next step.
+   beamWidth 1 with branch 1 is exactly the greedy construction. */
+function mix32(x) {
+  x = Math.imul(x ^ (x >>> 16), 0x45d9f3b); x = Math.imul(x ^ (x >>> 16), 0x45d9f3b);
+  return (x ^ (x >>> 16)) >>> 0;
+}
+function tourKey(tour) {
+  let s1 = 0, s2 = 0;
+  for (let k = 0; k < tour.length; k++) {
+    const a = tour[k], b = tour[(k + 1) % tour.length];
+    const e = a < b ? a * 65536 + b : b * 65536 + a;
+    s1 = (s1 + mix32(e)) >>> 0; s2 = (s2 + mix32(e ^ 0x9e3779b9)) >>> 0;
+  }
+  return s1 * 4294967296 + s2;
+}
+function insertionEstimate(ctx, st) {
+  const { n, D } = ctx, tour = st.tour, m = tour.length;
+  let sum = 0;
+  for (let p = 0; p < n; p++) {
+    if (st.adopted[p]) continue;
+    let best = Infinity;
+    for (let e = 0; e < m; e++) {
+      const a = tour[e], b = tour[(e + 1) % m];
+      const d = D[a * n + p] + D[p * n + b] - D[a * n + b];
+      if (d < best) best = d;
+    }
+    sum += best;
+  }
+  return sum;
+}
+
+export function constructBeam(P, n, userOpts = {}) {
+  const t0 = clock();
+  const ctx = makeContext(P, n, userOpts);
+  const B = Math.max(1, ctx.o.beamWidth | 0), K = Math.max(1, ctx.o.branch | 0);
+  const lengthOf = (tour) => tourLength(ctx.D, n, tour);
+  const alpha = ctx.o.estimateWeight;
+  const score = (st) => lengthOf(st.tour) + (st.remaining > 0 ? alpha * insertionEstimate(ctx, st) : 0);
+  let beam = [{ st: newState(ctx), path: null, done: false, score: 0 }];
+  let explored = 1, stepI = 0, peak = 1;
+
+  while (stepI < 3 * n + 30) {
+    const next = [], seen = new Set();
+    const push = (c) => { const key = tourKey(c.st.tour) + (c.done ? 0.5 : 0); if (seen.has(key)) return; seen.add(key); next.push(c); };
+    for (const b of beam) {
+      if (b.done) { push(b); continue; }
+      if (b.st.remaining > 0) {
+        const ag = agreedPairs(ctx, b.st), desc = describeAgreed(ctx, ag);
+        const ranked = ag.pairs.slice().sort((x, y) => (ctx.o.order === "best" ? x[2] - y[2] : y[2] - x[2]) || x[1] - y[1]).slice(0, K);
+        for (const pick of ranked) {
+          const st = cloneState(b.st);
+          const batch = [applyAdopt(ctx, st, ag, desc, pick, stepI)];
+          readoptAll(ctx, st, stepI, batch);
+          explored++;
+          push({ st, path: { evs: batch, parent: b.path }, done: false, score: score(st) });
+        }
+      } else {
+        const st = cloneState(b.st), batch = [];
+        readoptAll(ctx, st, stepI, batch);
+        if (!batch.length) { push({ ...b, done: true }); continue; }
+        explored++;
+        push({ st, path: { evs: batch, parent: b.path }, done: false, score: score(st) });
+      }
+    }
+    peak = Math.max(peak, next.length);
+    next.sort((a, b) => a.score - b.score);
+    beam = next.slice(0, B);
+    if (beam.every((c) => c.done)) break;
+    stepI++;
+  }
+
+  const finished = beam.filter((c) => c.st.remaining === 0);
+  const pool = finished.length ? finished : beam;
+  const winner = pool.reduce((a, b) => (lengthOf(b.st.tour) < lengthOf(a.st.tour) ? b : a));
+  const chain = [];
+  for (let p = winner.path; p; p = p.parent) chain.push(p.evs);
+  const events = chain.reverse().flat();
+  return finish(ctx, events, winner.st.tour, t0, {
+    beam: { width: B, branch: K, explored, finalists: pool.length, spread: pool.length > 1 ? (lengthOf(pool[pool.length - 1].st.tour) / lengthOf(winner.st.tour) - 1) * 100 : 0 },
+  });
 }
 
 /* ------------------------------------------------------------------ browser reference solver

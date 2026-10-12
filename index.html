@@ -50,12 +50,6 @@
     </dl>
     <p class="warn" id="warn" hidden></p>
 
-    <details class="group race" id="raceBox" open hidden>
-      <summary>Race results</summary>
-      <ol id="raceList" class="race-list"></ol>
-      <p class="hint">Each cost function ran its own greedy build in parallel. Pick one to replay its timeline.</p>
-    </details>
-
     <div class="playback" role="group" aria-label="Playback">
       <button id="back" class="icon" aria-label="Step back" title="Step back (left arrow)"><svg viewBox="0 0 24 24"><path d="M7 5v14M19 5 9 12l10 7z"/></svg></button>
       <button id="play" class="icon primary" aria-label="Pause" title="Play or pause (space)" data-state="playing">
@@ -100,8 +94,7 @@
 
     <details class="group" open>
       <summary>Algorithm</summary>
-      <label class="check"><input id="raceOn" type="checkbox" checked><span>Race every cost function and keep the shortest tour</span></label>
-      <label class="field"><span>Cost function for a single run</span><select id="cost"></select></label>
+      <label class="field"><span>What counts as cheap</span><select id="cost"></select></label>
       <label class="slider">
         <span>Longest arc <output id="arcLabel"></output> points</span>
         <input id="arc" type="range" min="1" max="8" step="1" value="4">
@@ -117,6 +110,23 @@
         <span>Arc neighbours <output id="knnLabel"></output></span>
         <input id="knn" type="range" min="3" max="10" step="1" value="6">
       </label>
+    </details>
+
+    <details class="group">
+      <summary>Beam search</summary>
+      <label class="slider">
+        <span>Tours kept <output id="beamLabel"></output></span>
+        <input id="beam" type="range" min="1" max="32" step="1" value="1">
+      </label>
+      <label class="slider">
+        <span>Forks per step <output id="branchLabel"></output></span>
+        <input id="branch" type="range" min="1" max="4" step="1" value="3">
+      </label>
+      <label class="slider">
+        <span>Look-ahead weight <output id="lookLabel"></output></span>
+        <input id="look" type="range" min="0" max="2" step="0.5" value="0">
+      </label>
+      <p class="hint">1 tour kept is the plain greedy run. With more, every tour forks into its cheapest agreed pairs at each step and only the best ones survive. The animation replays the winning branch. Dragging points always uses the greedy run so it stays instant.</p>
     </details>
 
     <details class="group">
@@ -183,34 +193,36 @@
   <p>After each adoption, points and arcs adopted in <em>earlier</em> steps can be lifted back out and re-adopted into a different edge, in either direction, as long as the real tour gets shorter. A point moves at most once per step and hull points never move. When everything is adopted the same loop keeps running as a polish until nothing improves.</p>
   <p>On screen, the edges an arc leaves behind flash purple and the arc itself turns orchid.</p>
 
+  <h2>Forking the timeline</h2>
+  <p>The greedy run always takes the cheapest agreed pair, but several pairs are usually agreed at once. Beam search keeps a handful of partial tours, forks each one into its cheapest few agreed pairs, drops duplicates, and keeps the best. Because one step costs so little, this is affordable: 8 tours with 3 forks each takes about 0.6 seconds at 120 points.</p>
+  <p>It helps, but less than you might hope. On 8 random 120-point instances with arcs of up to 3 points, the greedy tour averaged 0.86% longer than OR-Tools and the 8-by-3 beam averaged 0.2% shorter. Widening the beam beyond that did not reliably help, and with 8 instances the differences are inside the noise. Running many different configurations and keeping the best did about as well.</p>
+
   <h2>Change what &ldquo;cheap&rdquo; means</h2>
-  <p>The cost function is the only thing the construction cares about, and different costs make different tours. Swap it under Algorithm, or start from one of these:</p>
+  <p>The cost function is the only thing the construction cares about. Swap it under Algorithm, or start from one of these:</p>
   <ul class="presets">
     <li><a href="#" data-preset='{"kind":"random","n":60,"seed":3,"cost":"log"}'>Compressed detour, 60 points</a></li>
     <li><a href="#" data-preset='{"kind":"random","n":60,"seed":3,"cost":"detour","readopt":false}'>No re-adoption, 60 points</a></li>
     <li><a href="#" data-preset='{"kind":"random","n":60,"seed":3,"cost":"detour","arc":1,"readopt":true}'>Single points only</a></li>
     <li><a href="#" data-preset='{"kind":"clusters","n":120,"seed":4,"cost":"detour","arc":4}'>120 points in clusters</a></li>
     <li><a href="#" data-preset='{"kind":"messy12","n":12,"seed":1,"cost":"detour","arc":5}'>The 12-point messy set</a></li>
+    <li><a href="#" data-preset='{"kind":"random","n":120,"seed":2,"cost":"detour","arc":3,"beam":8,"branch":3}'>Beam search, 120 points</a></li>
   </ul>
 
-  <h2>Racing the cost functions</h2>
-  <p>No single cost wins everywhere, but each run is cheap and they are independent. So the page runs one greedy build per cost function, ten in all, on a pool of Web Workers, and keeps the shortest tour. Every run is still plain greedy: the cheapest agreed pair, every step. Click any row under Race results to replay that cost function&rsquo;s build.</p>
-
   <h2 id="compare">How it compares</h2>
-  <p>I gave OR-Tools the same random instances: a path-cheapest-arc start, then guided local search for 3 + n/5 seconds, the settings from the original script. The table uses 8 instances per size (seeds 11 to 18) that were not used to pick the cost functions, with the page&rsquo;s default arc sizes.</p>
+  <p>I ran the construction on 8 random instances at each size and gave OR-Tools the same points: a path-cheapest-arc start, then guided local search for 3 + n/5 seconds, the settings from the original script. Arcs were limited to 4 points.</p>
   <div class="table-wrap">
     <table>
-      <caption class="sr">Greedy tours and the cost-function race compared with OR-Tools on 8 fresh random instances per size</caption>
-      <thead><tr><th scope="col">Points</th><th scope="col">One greedy run vs OR-Tools</th><th scope="col">Race of 10 vs OR-Tools</th><th scope="col">Race: shorter / equal</th><th scope="col">OR-Tools time</th></tr></thead>
+      <caption class="sr">Adoption tour compared with OR-Tools on 8 random instances per size</caption>
+      <thead><tr><th scope="col">Points</th><th scope="col">Average length vs OR-Tools</th><th scope="col">Shorter / equal</th><th scope="col">Adoption tour</th><th scope="col">OR-Tools</th></tr></thead>
       <tbody>
-        <tr><th scope="row">30</th><td>+0.23%</td><td>+0.08%</td><td>0 / 6 of 8</td><td>9 s</td></tr>
-        <tr><th scope="row">60</th><td>+0.27%</td><td>&minus;0.61%</td><td>4 / 3 of 8</td><td>15 s</td></tr>
-        <tr><th scope="row">120</th><td>+0.84%</td><td>&minus;0.49%</td><td>5 / 0 of 8</td><td>27 s</td></tr>
+        <tr><th scope="row">30</th><td>+1.17%</td><td>0 / 2 of 8</td><td>9 ms</td><td>9 s</td></tr>
+        <tr><th scope="row">60</th><td>0.00%</td><td>3 / 1 of 8</td><td>31 ms</td><td>15 s</td></tr>
+        <tr><th scope="row">120</th><td>+0.11%</td><td>4 / 0 of 8</td><td>211 ms</td><td>27 s</td></tr>
       </tbody>
     </table>
   </div>
-  <p>A single greedy run lands within about 1% of a strong solver in a fraction of a second. Racing the ten costs closes that gap and, at 60 and 120 points, ends up slightly ahead on average. The ten runs take about 10 seconds one after another at 120 points; spread over workers the wall time is set by the slowest single run, roughly 2 seconds. At 30 points OR-Tools matched or beat the race on every instance. This is one run per instance on one machine, not a rigorous study.</p>
-  <p>The reference inside the visualiser is a different and, in this test, stronger baseline. OR-Tools can&rsquo;t run in a browser, so the page runs a 2-opt and Or-opt iterated search for a second or two instead. On the earlier set of 120-point instances it beat OR-Tools every time, which is why the gap shown beside the tour is often positive.</p>
+  <p>So the tour lands within about 1% of a strong solver in a fraction of a second, and at 120 points it was shorter than OR-Tools on half the instances. It does not always win: at 30 points OR-Tools matched or beat it every time. This is one run per instance on one machine, not a rigorous study.</p>
+  <p>The reference inside the visualiser is a different and, in this test, stronger baseline. OR-Tools can't run in a browser, so the page runs a 2-opt and Or-opt iterated search for a second or two instead. It beat OR-Tools on all 8 of the 120-point instances, which is why the gap shown beside the tour is often positive.</p>
 
   <h2>Run it yourself</h2>
   <p>Everything is static files: <code>index.html</code>, a stylesheet and four modules in <code>js/</code>, with no build step. Serve the folder with <code>python3 -m http.server</code> and open <code>localhost:8000</code>. The original Python script, with its matplotlib animation and OR-Tools comparison, lives in <code>tests/</code> next to the scripts that check the JavaScript port against it and produced the table above.</p>
