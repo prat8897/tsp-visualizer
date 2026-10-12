@@ -43,7 +43,6 @@
       <div><dt>Convex hull</dt><dd id="sHull">-</dd></div>
       <div><dt>Built in</dt><dd id="sBuilt">-</dd></div>
       <div><dt>Moves</dt><dd id="sMoves">-</dd></div>
-      <div class="wide"><dt>Search</dt><dd id="sSearch">-</dd></div>
       <div class="wide"><dt>Reference search</dt><dd id="sRef">-</dd></div>
       <div><dt>This tour is</dt><dd id="sGap">-</dd></div>
       <div><dt>Shared edges</dt><dd id="sShared">-</dd></div>
@@ -113,23 +112,6 @@
     </details>
 
     <details class="group">
-      <summary>Beam search</summary>
-      <label class="slider">
-        <span>Tours kept <output id="beamLabel"></output></span>
-        <input id="beam" type="range" min="1" max="32" step="1" value="1">
-      </label>
-      <label class="slider">
-        <span>Forks per step <output id="branchLabel"></output></span>
-        <input id="branch" type="range" min="1" max="4" step="1" value="3">
-      </label>
-      <label class="slider">
-        <span>Look-ahead weight <output id="lookLabel"></output></span>
-        <input id="look" type="range" min="0" max="2" step="0.5" value="0">
-      </label>
-      <p class="hint">1 tour kept is the plain greedy run. With more, every tour forks into its cheapest agreed pairs at each step and only the best ones survive. The animation replays the winning branch. Dragging points always uses the greedy run so it stays instant.</p>
-    </details>
-
-    <details class="group">
       <summary>View</summary>
       <label class="check"><input id="forces" type="checkbox" checked><span>Show the two forces before each adoption</span></label>
       <label class="check"><input id="numbers" type="checkbox" checked><span>Number the points (up to 60)</span></label>
@@ -193,10 +175,6 @@
   <p>After each adoption, points and arcs adopted in <em>earlier</em> steps can be lifted back out and re-adopted into a different edge, in either direction, as long as the real tour gets shorter. A point moves at most once per step and hull points never move. When everything is adopted the same loop keeps running as a polish until nothing improves.</p>
   <p>On screen, the edges an arc leaves behind flash purple and the arc itself turns orchid.</p>
 
-  <h2>Forking the timeline</h2>
-  <p>The greedy run always takes the cheapest agreed pair, but several pairs are usually agreed at once. Beam search keeps a handful of partial tours, forks each one into its cheapest few agreed pairs, drops duplicates, and keeps the best. Because one step costs so little, this is affordable: 8 tours with 3 forks each takes about 0.6 seconds at 120 points.</p>
-  <p>It helps, but less than you might hope. On 8 random 120-point instances with arcs of up to 3 points, the greedy tour averaged 0.86% longer than OR-Tools and the 8-by-3 beam averaged 0.2% shorter. Widening the beam beyond that did not reliably help, and with 8 instances the differences are inside the noise. Running many different configurations and keeping the best did about as well.</p>
-
   <h2>Change what &ldquo;cheap&rdquo; means</h2>
   <p>The cost function is the only thing the construction cares about. Swap it under Algorithm, or start from one of these:</p>
   <ul class="presets">
@@ -205,7 +183,6 @@
     <li><a href="#" data-preset='{"kind":"random","n":60,"seed":3,"cost":"detour","arc":1,"readopt":true}'>Single points only</a></li>
     <li><a href="#" data-preset='{"kind":"clusters","n":120,"seed":4,"cost":"detour","arc":4}'>120 points in clusters</a></li>
     <li><a href="#" data-preset='{"kind":"messy12","n":12,"seed":1,"cost":"detour","arc":5}'>The 12-point messy set</a></li>
-    <li><a href="#" data-preset='{"kind":"random","n":120,"seed":2,"cost":"detour","arc":3,"beam":8,"branch":3}'>Beam search, 120 points</a></li>
   </ul>
 
   <h2 id="compare">How it compares</h2>

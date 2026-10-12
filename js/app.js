@@ -21,8 +21,6 @@ const el = {
   edit: $("edit"),
   cost: $("cost"), arc: $("arc"), arcLabel: $("arcLabel"), readopt: $("readopt"), order: $("order"), rank: $("rank"),
   knn: $("knn"), knnLabel: $("knnLabel"),
-  beam: $("beam"), beamLabel: $("beamLabel"), branch: $("branch"), branchLabel: $("branchLabel"), look: $("look"), lookLabel: $("lookLabel"),
-  sSearch: $("sSearch"),
   forces: $("forces"), numbers: $("numbers"), compare: $("compare"), showRef: $("showRef"),
   sLen: $("sLen"), sStep: $("sStep"), sHull: $("sHull"), sBuilt: $("sBuilt"), sRef: $("sRef"), sGap: $("sGap"), sShared: $("sShared"),
   sMoves: $("sMoves"), warn: $("warn"),
@@ -36,7 +34,7 @@ function autoArc(n) { return n <= 40 ? 5 : n <= 150 ? 4 : 3; }
 
 const S = {
   kind: "random", n: 40, seed: 7, P: null,
-  opts: { ...DEFAULTS, arcMax: autoArc(40), branch: 3 },
+  opts: { ...DEFAULTS, arcMax: autoArc(40) },
   result: null, ref: null, refEdges: null,
   t: 0, playing: true, rate: 4,
   showForces: true, showNumbers: true, compare: true, showRef: false,
@@ -60,14 +58,8 @@ class Engine {
   }
   solve(P, n, opts) {
     return new Promise((resolve) => {
-      const job = { id: ++this.id, P, n, opts, resolve, heavy: (opts.beamWidth | 0) > 1 };
-      if (this.busy && this.worker && this.current && this.current.heavy) {
-        // a long beam search is running: throw it away instead of waiting for it
-        this.worker.terminate(); this._makeWorker();
-        this.current.resolve(null); this.current = null; this.busy = false;
-        if (this.pending) { this.pending.resolve(null); this.pending = null; }
-        this._run(job);
-      } else if (this.busy) { if (this.pending) this.pending.resolve(null); this.pending = job; } else this._run(job);
+      const job = { id: ++this.id, P, n, opts, resolve };
+      if (this.busy) { if (this.pending) this.pending.resolve(null); this.pending = job; } else this._run(job);
     });
   }
   _run(job, retry = false) {
@@ -145,7 +137,7 @@ function solveLive() {            // while dragging a point: show the finished t
   const my = ++token;
   const n = S.P.length / 2;
   if (n < MIN_POINTS) return;
-  engine.solve(S.P, n, { ...S.opts, beamWidth: 1 }).then((result) => {
+  engine.solve(S.P, n, { ...S.opts }).then((result) => {
     if (my !== token || !result) return;
     S.result = result; S.hullSet = new Set(result.hull);
     S.t = result.events.length; S.playing = false; S.ref = null; S.refEdges = null;
@@ -175,9 +167,6 @@ function syncControls() {
   el.cost.value = S.opts.cost; el.arc.value = String(S.opts.arcMax); el.arcLabel.textContent = String(S.opts.arcMax);
   el.readopt.checked = S.opts.readopt; el.order.value = S.opts.order; el.rank.value = S.opts.rankBy;
   el.knn.value = String(S.opts.knn); el.knnLabel.textContent = String(S.opts.knn);
-  el.beam.value = String(S.opts.beamWidth); el.beamLabel.textContent = S.opts.beamWidth === 1 ? "1 (greedy)" : String(S.opts.beamWidth);
-  el.branch.value = String(S.opts.branch); el.branchLabel.textContent = String(S.opts.branch);
-  el.look.value = String(S.opts.estimateWeight); el.lookLabel.textContent = String(S.opts.estimateWeight);
   el.numbers.checked = S.showNumbers; el.compare.checked = S.compare; el.showRef.checked = S.showRef;
   for (const b of document.querySelectorAll("[data-edit]")) b.setAttribute("aria-pressed", String(b.dataset.edit === S.editMode));
   el.plot.dataset.edit = S.editMode;
@@ -186,7 +175,6 @@ function syncControls() {
 function writeHash() {
   if (S.kind === "custom") { history.replaceState(null, "", location.pathname + location.search); return; }
   const h = new URLSearchParams({ kind: S.kind, n: String(S.n), seed: String(S.seed), arc: String(S.opts.arcMax), cost: S.opts.cost });
-  if (S.opts.beamWidth > 1) { h.set("beam", String(S.opts.beamWidth)); h.set("branch", String(S.opts.branch)); }
   history.replaceState(null, "", "#" + h.toString());
 }
 
@@ -199,8 +187,6 @@ function readHash() {
   S.arcTouched = arc >= 1 && arc <= 8;
   S.opts.arcMax = S.arcTouched ? arc : autoArc(S.n);
   if (COSTS[h.get("cost")]) S.opts.cost = h.get("cost");
-  const bw = parseInt(h.get("beam")); if (bw >= 1 && bw <= 32) S.opts.beamWidth = bw;
-  const br = parseInt(h.get("branch")); if (br >= 1 && br <= 4) S.opts.branch = br;
 }
 
 function bindControls() {
@@ -222,9 +208,6 @@ function bindControls() {
   el.cost.onchange = () => { S.opts.cost = el.cost.value; opt(); };
   el.arc.oninput = () => { S.arcTouched = true; el.arcLabel.textContent = el.arc.value; later(() => { S.opts.arcMax = +el.arc.value; opt(); }); };
   el.knn.oninput = () => { el.knnLabel.textContent = el.knn.value; later(() => { S.opts.knn = +el.knn.value; opt(); }); };
-  el.beam.oninput = () => { el.beamLabel.textContent = el.beam.value === "1" ? "1 (greedy)" : el.beam.value; later(() => { S.opts.beamWidth = +el.beam.value; opt(); }); };
-  el.branch.oninput = () => { el.branchLabel.textContent = el.branch.value; later(() => { S.opts.branch = +el.branch.value; if (S.opts.beamWidth > 1) opt(); }); };
-  el.look.oninput = () => { el.lookLabel.textContent = el.look.value; later(() => { S.opts.estimateWeight = +el.look.value; if (S.opts.beamWidth > 1) opt(); }); };
   el.readopt.onchange = () => { S.opts.readopt = el.readopt.checked; opt(); };
   el.order.onchange = () => { S.opts.order = el.order.value; opt(); };
   el.rank.onchange = () => { S.opts.rankBy = el.rank.value; opt(); };
@@ -259,8 +242,6 @@ function bindControls() {
     if (p.cost) S.opts.cost = p.cost;
     if (p.arc) { S.opts.arcMax = p.arc; S.arcTouched = true; }
     if (p.readopt !== undefined) S.opts.readopt = p.readopt;
-    S.opts.beamWidth = p.beam || 1;
-    if (p.branch) S.opts.branch = p.branch;
     newInstance(p.kind || S.kind, p.n || S.n, p.seed ?? S.seed);
     document.getElementById("top").scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth" });
   };
@@ -509,7 +490,6 @@ function updateText() {
     setText(el.sHull, f1(R.hullLength));
     setText(el.sBuilt, `${R.ms < 10 ? R.ms.toFixed(1) : Math.round(R.ms)} ms`);
     setText(el.sMoves, `${R.adoptions} adoptions, ${R.readoptions} re-adoptions`);
-    setText(el.sSearch, R.beam ? `Beam of ${R.beam.width}, ${R.beam.branch} forks per step: ${R.beam.explored.toLocaleString()} partial tours tried` : "Greedy: cheapest agreed pair each step");
     if (S.ref) {
       setText(el.sRef, `${f1(S.ref.length)} in ${(S.ref.ms / 1000).toFixed(1)} s`);
       const g = (R.length / S.ref.length - 1) * 100;
@@ -523,7 +503,7 @@ function updateText() {
     el.warn.hidden = !R.capped;
     if (R.capped) el.warn.textContent = `Arcs capped at ${R.arcMaxUsed} points: longer chains would mean more than ${DEFAULTS.maxChains.toLocaleString()} candidates.`;
   } else {
-    for (const k of ["sLen", "sStep", "sHull", "sBuilt", "sRef", "sGap", "sShared", "sMoves", "sSearch"]) setText(el[k], "-");
+    for (const k of ["sLen", "sStep", "sHull", "sBuilt", "sRef", "sGap", "sShared", "sMoves"]) setText(el[k], "-");
     el.warn.hidden = true;
   }
   if (R) {
