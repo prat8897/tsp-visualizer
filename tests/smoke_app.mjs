@@ -22,7 +22,7 @@ globalThis.matchMedia = () => ({ matches: false });
 globalThis.ResizeObserver = class { constructor(f) { this.f = f; } observe() {} };
 globalThis.devicePixelRatio = 2;
 globalThis.history = { replaceState: noop };
-globalThis.location = { hash: "", pathname: "/", search: "" };
+globalThis.location = { hash: process.env.HASH || "", pathname: "/", search: "" };
 globalThis.addEventListener = noop;
 let raf = null;
 globalThis.requestAnimationFrame = (f) => { raf = f; };

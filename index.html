@@ -99,6 +99,7 @@
         <input id="arc" type="range" min="1" max="8" step="1" value="4">
       </label>
       <label class="check"><input id="readopt" type="checkbox" checked><span>Re-adopt points that fit better elsewhere</span></label>
+      <label class="check"><input id="polish" type="checkbox" checked><span>Finish with a 2-opt and Or-opt search</span></label>
       <label class="field"><span>Adopt first</span>
         <select id="order"><option value="best">The cheapest agreed pair</option><option value="worst">The most expensive agreed pair</option></select>
       </label>
@@ -128,6 +129,7 @@
         <li><i class="sw arrow" style="--c:#f59e0b"></i>Outside-in: an edge points at its favourite candidate</li>
         <li><i class="sw dash" style="--c:#ec3d2a"></i>The move about to happen</li>
         <li><i class="sw dash" style="--c:#7c3aed"></i>Re-adoption: the edges an arc left behind</li>
+        <li><i class="sw dash" style="--c:#7c3aed"></i>Final search: edges swapped out</li>
         <li><i class="dot" style="--c:#ffc21a"></i>Just adopted</li>
         <li><i class="dot" style="--c:#b83fd1"></i>Just re-adopted</li>
         <li><i class="dot hollow"></i>Not in the tour yet</li>
@@ -175,6 +177,10 @@
   <p>After each adoption, points and arcs adopted in <em>earlier</em> steps can be lifted back out and re-adopted into a different edge, in either direction, as long as the real tour gets shorter. A point moves at most once per step and hull points never move. When everything is adopted the same loop keeps running as a polish until nothing improves.</p>
   <p>On screen, the edges an arc leaves behind flash purple and the arc itself turns orchid.</p>
 
+  <h2>The final search</h2>
+  <p>Once every point is in, the tour gets a short finishing search: 2-opt (swap two edges and reverse the stretch between them) and Or-opt (move a short run of points elsewhere), each limited to a point&rsquo;s ten nearest neighbours. On its own that finds nothing. I checked 48 finished tours exhaustively and none had a single improving 2-opt move, because adoption and re-adoption already leave tours that are 2-opt-optimal.</p>
+  <p>What pays is a nudge. The search cuts two neighbouring stretches of the tour and swaps them at random, repairs the damage with 2-opt and Or-opt, and keeps the result only if the tour got shorter. It makes four nudges per point, which takes 10 to 50 milliseconds. Each kept improvement is a step in the animation: the edges that leave flash purple and the new ones glow.</p>
+
   <h2>Change what &ldquo;cheap&rdquo; means</h2>
   <p>The cost function is the only thing the construction cares about. Swap it under Algorithm, or start from one of these:</p>
   <ul class="presets">
@@ -186,20 +192,20 @@
   </ul>
 
   <h2 id="compare">How it compares</h2>
-  <p>I ran the construction on 8 random instances at each size and gave OR-Tools the same points: a path-cheapest-arc start, then guided local search for 3 + n/5 seconds, the settings from the original script. Arcs were limited to 4 points.</p>
+  <p>I gave OR-Tools the same random instances: a path-cheapest-arc start, then guided local search for 3 + n/5 seconds, the settings from the original script. The table uses 8 instances per size (seeds 21 to 28) that I generated after the method was fixed, with the page&rsquo;s default arc sizes.</p>
   <div class="table-wrap">
     <table>
-      <caption class="sr">Adoption tour compared with OR-Tools on 8 random instances per size</caption>
-      <thead><tr><th scope="col">Points</th><th scope="col">Average length vs OR-Tools</th><th scope="col">Shorter / equal</th><th scope="col">Adoption tour</th><th scope="col">OR-Tools</th></tr></thead>
+      <caption class="sr">Adoption tour, with and without the final search, compared with OR-Tools on 8 fresh random instances per size</caption>
+      <thead><tr><th scope="col">Points</th><th scope="col">Adoption only vs OR-Tools</th><th scope="col">With final search vs OR-Tools</th><th scope="col">Final search: shorter / equal</th><th scope="col">Time with final search</th><th scope="col">OR-Tools time</th></tr></thead>
       <tbody>
-        <tr><th scope="row">30</th><td>+1.17%</td><td>0 / 2 of 8</td><td>9 ms</td><td>9 s</td></tr>
-        <tr><th scope="row">60</th><td>0.00%</td><td>3 / 1 of 8</td><td>31 ms</td><td>15 s</td></tr>
-        <tr><th scope="row">120</th><td>+0.11%</td><td>4 / 0 of 8</td><td>211 ms</td><td>27 s</td></tr>
+        <tr><th scope="row">30</th><td>+0.40%</td><td>0.00%</td><td>0 / 8 of 8</td><td>about 25 ms</td><td>9 s</td></tr>
+        <tr><th scope="row">60</th><td>+0.54%</td><td>&minus;0.58%</td><td>3 / 5 of 8</td><td>about 45 ms</td><td>15 s</td></tr>
+        <tr><th scope="row">120</th><td>&minus;0.15%</td><td>&minus;2.71%</td><td>8 / 0 of 8</td><td>about 190 ms</td><td>27 s</td></tr>
       </tbody>
     </table>
   </div>
-  <p>So the tour lands within about 1% of a strong solver in a fraction of a second, and at 120 points it was shorter than OR-Tools on half the instances. It does not always win: at 30 points OR-Tools matched or beat it every time. This is one run per instance on one machine, not a rigorous study.</p>
-  <p>The reference inside the visualiser is a different and, in this test, stronger baseline. OR-Tools can't run in a browser, so the page runs a 2-opt and Or-opt iterated search for a second or two instead. It beat OR-Tools on all 8 of the 120-point instances, which is why the gap shown beside the tour is often positive.</p>
+  <p>With the final search the tour was never longer than OR-Tools&rsquo; on any of these 24 instances. It matched OR-Tools exactly at 30 points and was shorter on all 8 instances at 120 points, by 2.7% on average, in about a fifth of a second. This is one run per instance on one machine, not a rigorous study, and OR-Tools&rsquo; answer is not guaranteed optimal either.</p>
+  <p>The reference inside the visualiser is a stand-in. OR-Tools can&rsquo;t run in a browser, so the page runs the same kind of search from a nearest-neighbour tour for a second or two. The finishing step uses the same method, so the gap shown beside the tour is small and can go either way.</p>
 
   <h2>Run it yourself</h2>
   <p>Everything is static files: <code>index.html</code>, a stylesheet and four modules in <code>js/</code>, with no build step. Serve the folder with <code>python3 -m http.server</code> and open <code>localhost:8000</code>. The original Python script, with its matplotlib animation and OR-Tools comparison, lives in <code>tests/</code> next to the scripts that check the JavaScript port against it and produced the table above.</p>

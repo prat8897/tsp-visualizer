@@ -34,6 +34,8 @@ export const DEFAULTS = {
   arcMax: 3,
   knn: 6,
   readopt: true,
+  polishIters: null,     // iterations of the final search (2-opt + Or-opt with random kicks): null = 4 per point, 0 = off
+  polishSeed: 1,
   requireShorter: true,
   maxChains: 400000,     // safety valve: arc enumeration grows fast with arcMax
 };
@@ -398,6 +400,14 @@ export function construct(P, n, userOpts = {}) {
     events.push(...batch);
     stepI++;
   }
+
+  /* ---- finish: a short 2-opt + Or-opt search with random kicks; every improvement is its own step ---- */
+  const polishIters = o.polishIters === null || o.polishIters === undefined ? Math.min(2000, Math.max(200, 4 * n)) : o.polishIters;
+  if (polishIters > 0 && n >= 8) {
+    const res = iteratedLocalSearch(D, n, tour, { maxIters: polishIters, seed: o.polishSeed, record: true });
+    for (const ev of res.improvements) events.push({ ...ev, step: stepI++ });
+    tour = res.tour;
+  }
   const now = (typeof performance !== "undefined" ? performance : Date).now();
   return {
     events, hull, tour, n,
@@ -405,31 +415,25 @@ export function construct(P, n, userOpts = {}) {
     ms: now - t0, chains: C, arcMaxUsed, arcMaxAsked: arcMax, capped: cappedAt > 0,
     adoptions: events.filter((e) => e.type === "adopt").length,
     readoptions: events.filter((e) => e.type === "readopt").length,
+    polishes: events.filter((e) => e.type === "polish").length,
   };
 }
 
-/* ------------------------------------------------------------------ browser reference solver
-   OR-Tools can't run in a browser, so the page compares against a strong, honest stand-in:
-   iterated local search (2-opt + Or-opt with neighbour lists, double-bridge kicks). */
-export function referenceSolve(P, n, budgetMs = 1500, seed = 1) {
-  const D = distanceMatrix(P, n);
+/* ------------------------------------------------------------------ final search
+   Iterated local search on a finished tour: 2-opt and Or-opt with neighbour lists, then random segment-swap
+   kicks; a kick is kept only if the tour ends up shorter. On a construction tour 2-opt and Or-opt alone find
+   nothing (those tours are already locally optimal), so the kicks are what pay. With `record`, every accepted
+   improvement is returned as a "polish" event listing the edges it removed and added. */
+export function iteratedLocalSearch(D, n, startTour, { budgetMs = Infinity, maxIters = Infinity, seed = 1, record = false } = {}) {
+  const now = () => (typeof performance !== "undefined" ? performance : Date).now();
+  const start = now();
   const rnd = mulberry32(seed);
   const K = Math.min(10, n - 1);
   const neigh = Array.from({ length: n }, (_, i) =>
     Array.from({ length: n }, (_, j) => j).filter((j) => j !== i)
-      .sort((a, b) => D[i * n + a] - D[i * n + b]).slice(0, K));
-  const now = () => (typeof performance !== "undefined" ? performance : Date).now();
-  const start = now();
-
-  // nearest-neighbour start
-  let t = [0];
-  const used = new Uint8Array(n); used[0] = 1;
-  for (let k = 1; k < n; k++) {
-    const c = t[k - 1]; let b = -1, bd = Infinity;
-    for (let j = 0; j < n; j++) if (!used[j] && D[c * n + j] < bd) { bd = D[c * n + j]; b = j; }
-    t.push(b); used[b] = 1;
-  }
-  let pos = new Int32Array(n);
+      .sort((a, b) => D[i * n + a] - D[i * n + b] || a - b).slice(0, K));
+  let t = startTour.slice();
+  const pos = new Int32Array(n);
   const setPos = () => { for (let i = 0; i < n; i++) pos[t[i]] = i; };
   setPos();
   const nxt = (v) => t[(pos[v] + 1) % n], prv = (v) => t[(pos[v] - 1 + n) % n];
@@ -513,9 +517,24 @@ export function referenceSolve(P, n, budgetMs = 1500, seed = 1) {
   }
 
   const len = () => tourLength(D, n, t);
+  const improvements = [];
+  let best = t.slice(), bestLen = len(), bestSet = record ? edgeSet(best) : null;
+  const keep = (tour, L) => {                          // a new best tour: remember it, and what changed
+    if (record) {
+      const set = edgeSet(tour), dec = (k) => [Math.floor(k / 65536), k % 65536];
+      improvements.push({
+        type: "polish", net: bestLen - L,
+        removed: [...bestSet].filter((k) => !set.has(k)).map(dec), added: [...set].filter((k) => !bestSet.has(k)).map(dec),
+        tourAfter: tour.slice(),
+      });
+      bestSet = set;
+    }
+    best = tour.slice(); bestLen = L;
+  };
   localSearch(t.slice());
-  let best = t.slice(), bestLen = len(), iters = 0;
-  while (now() - start < budgetMs && n >= 8) {
+  { const L0 = len(); if (L0 < bestLen - 1e-9) keep(t, L0); }
+  let iters = 0;
+  while (iters < maxIters && now() - start < budgetMs && n >= 8) {
     iters++;
     const i = Math.floor(rnd() * n);
     const maxSeg = Math.max(1, Math.min(30, Math.floor((n - 2) / 2)));
@@ -527,8 +546,24 @@ export function referenceSolve(P, n, budgetMs = 1500, seed = 1) {
     setPos();
     localSearch(touched);
     const L2 = len();
-    if (L2 < bestLen - 1e-9) { bestLen = L2; best = t.slice(); }
+    if (L2 < bestLen - 1e-9) keep(t, L2);
     else { t = best.slice(); setPos(); }
   }
-  return { tour: best, length: bestLen, iterations: iters, ms: now() - start };
+  return { tour: best, length: bestLen, iterations: iters, improvements, ms: now() - start };
+}
+
+/* The in-page reference. OR-Tools can't run in a browser, so the page compares against a stand-in:
+   the same search, started from a nearest-neighbour tour and given a time budget instead of an iteration count. */
+export function referenceSolve(P, n, budgetMs = 1500, seed = 1) {
+  const now = () => (typeof performance !== "undefined" ? performance : Date).now();
+  const start = now();
+  const D = distanceMatrix(P, n);
+  const t = [0], used = new Uint8Array(n); used[0] = 1;
+  for (let k = 1; k < n; k++) {
+    const c = t[k - 1]; let b = -1, bd = Infinity;
+    for (let j = 0; j < n; j++) if (!used[j] && D[c * n + j] < bd) { bd = D[c * n + j]; b = j; }
+    t.push(b); used[b] = 1;
+  }
+  const r = iteratedLocalSearch(D, n, t, { budgetMs: Math.max(0, budgetMs - (now() - start)), seed });
+  return { tour: r.tour, length: r.length, iterations: r.iterations, ms: now() - start };
 }

@@ -19,7 +19,7 @@ const el = {
   scrub: $("scrub"), speed: $("speed"), speedLabel: $("speedLabel"),
   kind: $("kind"), n: $("n"), nLabel: $("nLabel"), seed: $("seed"), shuffle: $("shuffle"), clear: $("clear"),
   edit: $("edit"),
-  cost: $("cost"), arc: $("arc"), arcLabel: $("arcLabel"), readopt: $("readopt"), order: $("order"), rank: $("rank"),
+  cost: $("cost"), arc: $("arc"), arcLabel: $("arcLabel"), readopt: $("readopt"), polish: $("polish"), order: $("order"), rank: $("rank"),
   knn: $("knn"), knnLabel: $("knnLabel"),
   forces: $("forces"), numbers: $("numbers"), compare: $("compare"), showRef: $("showRef"),
   sLen: $("sLen"), sStep: $("sStep"), sHull: $("sHull"), sBuilt: $("sBuilt"), sRef: $("sRef"), sGap: $("sGap"), sShared: $("sShared"),
@@ -165,7 +165,7 @@ function syncControls() {
   el.nLabel.textContent = String(n);
   el.seed.value = String(S.seed);
   el.cost.value = S.opts.cost; el.arc.value = String(S.opts.arcMax); el.arcLabel.textContent = String(S.opts.arcMax);
-  el.readopt.checked = S.opts.readopt; el.order.value = S.opts.order; el.rank.value = S.opts.rankBy;
+  el.readopt.checked = S.opts.readopt; el.polish.checked = S.opts.polishIters !== 0; el.order.value = S.opts.order; el.rank.value = S.opts.rankBy;
   el.knn.value = String(S.opts.knn); el.knnLabel.textContent = String(S.opts.knn);
   el.numbers.checked = S.showNumbers; el.compare.checked = S.compare; el.showRef.checked = S.showRef;
   for (const b of document.querySelectorAll("[data-edit]")) b.setAttribute("aria-pressed", String(b.dataset.edit === S.editMode));
@@ -209,6 +209,7 @@ function bindControls() {
   el.arc.oninput = () => { S.arcTouched = true; el.arcLabel.textContent = el.arc.value; later(() => { S.opts.arcMax = +el.arc.value; opt(); }); };
   el.knn.oninput = () => { el.knnLabel.textContent = el.knn.value; later(() => { S.opts.knn = +el.knn.value; opt(); }); };
   el.readopt.onchange = () => { S.opts.readopt = el.readopt.checked; opt(); };
+  el.polish.onchange = () => { S.opts.polishIters = el.polish.checked ? null : 0; opt(); };
   el.order.onchange = () => { S.opts.order = el.order.value; opt(); };
   el.rank.onchange = () => { S.opts.rankBy = el.rank.value; opt(); };
 
@@ -331,6 +332,7 @@ function frame() {
   if (t >= E) return { kind: "final" };
   const k = Math.floor(t), f = t - k, ev = R.events[k];
   if (ev.type === "adopt") return { kind: S.showForces && f < 0.5 ? "select" : "adopt", ev, k };
+  if (ev.type === "polish") return { kind: "polish", ev, k };
   return { kind: "readopt", ev, k };
 }
 const tourBefore = (R, k) => (k === 0 ? R.hull : R.events[k - 1].tourAfter);
@@ -375,7 +377,7 @@ function draw() {
   const drawTour = (tour, glow) => {
     const m = tour.length;
     if (glow) for (const [u, w] of glow) seg(u, w, 9 * dense + 3, COL.glow, 0, 0, 5 * dense);
-    const cmp = S.compare && S.refEdges && (F.kind === "final" || F.kind === "adopt" || F.kind === "readopt" || F.kind === "start");
+    const cmp = S.compare && S.refEdges && (F.kind === "final" || F.kind === "adopt" || F.kind === "readopt" || F.kind === "polish" || F.kind === "start");
     for (let k = 0; k < m; k++) {
       const u = tour[k], w = tour[(k + 1) % m];
       const good = cmp && S.refEdges.has(edgeKey(u, w));
@@ -437,6 +439,11 @@ function draw() {
       seg(ev.u, ev.arc[0], 2.4, COL.purple, 5, 4); seg(ev.arc[ev.arc.length - 1], ev.w, 2.4, COL.purple, 5, 4);
       const glow = [[ev.a, ev.placed[0]], [ev.placed[ev.placed.length - 1], ev.b], [ev.u, ev.w]];
       drawTour(ev.tourAfter, glow); drawPoints(ev.tourAfter, ev.arc, COL.orchid);
+    } else if (F.kind === "polish") {
+      const ev = F.ev;
+      for (const [u, w] of ev.removed) seg(u, w, 2.4, COL.purple, 5, 4);
+      drawTour(ev.tourAfter, ev.added);
+      drawPoints(ev.tourAfter, [...new Set([...ev.removed, ...ev.added].flat())], COL.orchid);
     }
   }
   rd.end();
@@ -474,8 +481,11 @@ function updateText() {
   } else if (F.kind === "readopt") {
     const ev = F.ev;
     cap = `Step ${ev.step + 1}: re-adopted ${label(ev.arc)}, lifted from between ${ev.u} and ${ev.w} into edge ${ev.a}-${ev.b}, saving ${ev.net.toFixed(2)}.`;
+  } else if (F.kind === "polish") {
+    const ev = F.ev;
+    cap = `Step ${ev.step + 1}: final search swapped ${ev.removed.length} edges for ${ev.added.length} and saved ${ev.net.toFixed(2)}. Tour now ${f1(len(ev.tourAfter))}.`;
   } else {
-    cap = `Done: length ${f1(R.length)} after ${R.adoptions} adoptions and ${R.readoptions} re-adoptions.`;
+    cap = `Done: length ${f1(R.length)} after ${R.adoptions} adoptions, ${R.readoptions} re-adoptions and ${R.polishes} final-search improvements.`;
   }
   if (S.solving && R) cap = "Solving...";
   if (cap !== lastCaption) { el.caption.textContent = cap; lastCaption = cap; }
@@ -484,12 +494,12 @@ function updateText() {
     const E = R.events.length;
     let cur = R.hullLength;
     if (F.kind === "final") cur = R.length; else if (F.kind === "adopt" || F.kind === "select") cur = len(F.kind === "select" ? tourBefore(R, F.k) : F.ev.tourAfter);
-    else if (F.kind === "readopt") cur = len(F.ev.tourAfter);
+    else if (F.kind === "readopt" || F.kind === "polish") cur = len(F.ev.tourAfter);
     setText(el.sLen, f1(cur));
     setText(el.sStep, F.kind === "final" ? `${E} of ${E}` : `${Math.min(E, Math.floor(S.t))} of ${E}`);
     setText(el.sHull, f1(R.hullLength));
     setText(el.sBuilt, `${R.ms < 10 ? R.ms.toFixed(1) : Math.round(R.ms)} ms`);
-    setText(el.sMoves, `${R.adoptions} adoptions, ${R.readoptions} re-adoptions`);
+    setText(el.sMoves, `${R.adoptions} adoptions, ${R.readoptions} re-adoptions, ${R.polishes} final-search swaps`);
     if (S.ref) {
       setText(el.sRef, `${f1(S.ref.length)} in ${(S.ref.ms / 1000).toFixed(1)} s`);
       const g = (R.length / S.ref.length - 1) * 100;

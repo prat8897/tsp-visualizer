@@ -11,7 +11,7 @@ const cases = [];
 for (const kind of ["random", "clusters", "grid"]) for (const n of [12, 25, 40]) for (const seed of [1, 2]) for (const arc of [1, 3]) cases.push({ kind, n, seed, arc });
 for (const c of cases) {
   const P = makeInstance(c.kind, c.n, c.seed);
-  const js = construct(P, c.n, { arcMax: c.arc, maxChains: 1e9 });
+  const js = construct(P, c.n, { arcMax: c.arc, maxChains: 1e9, polishIters: 0 });
   const f = join(dir, "p.json");
   writeFileSync(f, JSON.stringify({ points: Array.from(P), arcMax: c.arc }));
   const py = JSON.parse(execFileSync("python3", ["compare.py", f], { encoding: "utf8" }).trim().split("\n").pop());
