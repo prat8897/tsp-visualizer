@@ -236,41 +236,95 @@ export function construct(P, n, userOpts = {}) {
       }
     }
   }
-  let aliveList = Int32Array.from({ length: C }, (_, i) => i);
-  const rowEdge = new Int32Array(C);
   const chainOf = (ci) => Array.from(chainPts.subarray(chainStart[ci], chainStart[ci] + chainLen[ci]));
+
+  /* ---- incremental bookkeeping ----------------------------------------------------------------
+     An adoption (or re-adoption) changes the cost matrix only locally: a few edges disappear, a few appear,
+     and the candidates that touch an adopted point die. Every other entry keeps its value. So we remember
+     each candidate's favourite edge (row) and each edge's favourite candidate (column) and repair only
+     what changed, instead of recomputing candidates x edges from scratch every step. */
+  const alive = new Uint8Array(C).fill(1);               // 1 while every point of the chain is unadopted
+  const cop = (() => {                                   // chains containing each point, as a CSR index
+    const start = new Int32Array(n + 1);
+    for (let c = 0; c < C; c++) for (let q = 0; q < chainLen[c]; q++) start[chainPts[chainStart[c] + q] + 1]++;
+    for (let i = 0; i < n; i++) start[i + 1] += start[i];
+    const fillAt = start.slice(0, n), list = new Int32Array(start[n]);
+    for (let c = 0; c < C; c++) for (let q = 0; q < chainLen[c]; q++) list[fillAt[chainPts[chainStart[c] + q]]++] = c;
+    return { start, list };
+  })();
+  let aliveList = Int32Array.from({ length: C }, (_, i) => i);
+  const rowEdge = new Int32Array(C).fill(-1), rowMet = new Float64Array(C).fill(Infinity);
+  const eA = [], eB = [], eD = [], eLive = [], colChain = [], colMet = [], posOf = [];
+  const edgeId = new Map();                              // ordered edge a->b  =>  edge id
+  let slotId = [];                                       // slotId[e] = id of the edge at tour position e
+  const metricOf = (ci, id) => {
+    const k = kPts[ci], c = cost(D[eA[id] * n + first[ci]], arcLen[ci], D[last[ci] * n + eB[id]], eD[id], k);
+    return perPoint ? c / k : c;
+  };
+  function computeColumn(id) {
+    let best = Infinity, arg = -1;
+    for (let t = 0; t < aliveList.length; t++) {
+      const ci = aliveList[t], met = metricOf(ci, id);
+      if (met < best) { best = met; arg = ci; }
+    }
+    colMet[id] = best; colChain[id] = arg;
+  }
+  /** Diff the tour's edges against the ones we know. Returns the ids of the edges that are new. */
+  function syncEdges() {
+    const m = tour.length, keys = new Array(m), cur = new Set();
+    for (let e = 0; e < m; e++) { keys[e] = tour[e] * n + tour[(e + 1) % m]; cur.add(keys[e]); }
+    for (const [key, id] of edgeId) if (!cur.has(key)) { eLive[id] = 0; edgeId.delete(key); }
+    const added = [];
+    slotId = new Array(m);
+    for (let e = 0; e < m; e++) {
+      let id = edgeId.get(keys[e]);
+      if (id === undefined) {
+        id = eA.length;
+        eA.push(tour[e]); eB.push(tour[(e + 1) % m]); eD.push(D[tour[e] * n + tour[(e + 1) % m]]);
+        eLive.push(1); colChain.push(-1); colMet.push(Infinity); posOf.push(0);
+        edgeId.set(keys[e], id); added.push(id);
+      }
+      slotId[e] = id; posOf[id] = e;
+    }
+    return added;
+  }
 
   /* ---- one adoption step: both forces must agree ---- */
   function adoptStep(stepI) {
+    const added = syncEdges();
     const m = tour.length;
-    const colBest = new Float64Array(m).fill(Infinity), colArg = new Int32Array(m).fill(-1);
-    const Dab = new Float64Array(m);
-    for (let e = 0; e < m; e++) Dab[e] = D[tour[e] * n + tour[(e + 1) % m]];
-    const T = Int32Array.from(tour), Bn = new Int32Array(m);
-    for (let e = 0; e < m; e++) Bn[e] = tour[(e + 1) % m];
+    { let w = 0; for (let t = 0; t < aliveList.length; t++) { const ci = aliveList[t]; if (alive[ci]) aliveList[w++] = ci; } aliveList = aliveList.subarray(0, w); }
 
+    // outside-in: new edges pick a favourite; so do edges whose favourite candidate was just adopted away
+    for (const id of added) computeColumn(id);
+    for (let e = 0; e < m; e++) { const id = slotId[e]; if (colChain[id] < 0 || !alive[colChain[id]]) computeColumn(id); }
+    // inside-out: a candidate only needs a full look if its favourite edge is gone; otherwise it just meets the new edges
     for (let t = 0; t < aliveList.length; t++) {
-      const ci = aliveList[t], f = first[ci], l = last[ci], len = arcLen[ci], k = kPts[ci];
-      let rb = Infinity, re = -1;
-      for (let e = 0; e < m; e++) {
-        const c = cost(D[T[e] * n + f], len, D[l * n + Bn[e]], Dab[e], k);
-        const met = perPoint ? c / k : c;
-        if (met < rb) { rb = met; re = e; }
-        if (met < colBest[e]) { colBest[e] = met; colArg[e] = ci; }
+      const ci = aliveList[t];
+      let re = rowEdge[ci], rm = rowMet[ci];
+      if (re < 0 || !eLive[re]) {
+        rm = Infinity; re = -1;
+        for (let e = 0; e < m; e++) { const met = metricOf(ci, slotId[e]); if (met < rm) { rm = met; re = slotId[e]; } }
+      } else {
+        for (let q = 0; q < added.length; q++) {
+          const id = added[q], met = metricOf(ci, id);
+          if (met < rm || (met === rm && posOf[id] < posOf[re])) { rm = met; re = id; }
+        }
       }
-      rowEdge[ci] = re;
+      rowEdge[ci] = re; rowMet[ci] = rm;
     }
+
     const agreedRaw = [];
     for (let e = 0; e < m; e++) {
-      const ci = colArg[e];
-      if (ci >= 0 && rowEdge[ci] === e) agreedRaw.push([ci, e, colBest[e]]);
+      const id = slotId[e], ci = colChain[id];
+      if (ci >= 0 && rowEdge[ci] === id) agreedRaw.push([ci, e, colMet[id]]);
     }
     if (!agreedRaw.length) throw new Error("no agreed pair -- is the cost function returning NaN?");
     let pick = agreedRaw[0];
     for (const x of agreedRaw) {
       if (o.order === "best" ? x[2] < pick[2] : x[2] > pick[2]) pick = x;
     }
-    const costOf = (ci, e) => cost(D[T[e] * n + first[ci]], arcLen[ci], D[last[ci] * n + Bn[e]], Dab[e], kPts[ci]);
+    const costOf = (ci, e) => cost(D[tour[e] * n + first[ci]], arcLen[ci], D[last[ci] * n + tour[(e + 1) % m]], eD[slotId[e]], kPts[ci]);
     const [pci, e] = pick;
     const ch = chainOf(pci);
     const ev = {
@@ -279,15 +333,10 @@ export function construct(P, n, userOpts = {}) {
       agreed: agreedRaw.map(([ci, ee, met]) => ({ chain: chainOf(ci), edge: ee, metric: met, cost: costOf(ci, ee) })),
     };
     tour = tour.slice(0, e + 1).concat(ch, tour.slice(e + 1));
-    for (const p of ch) { adopted[p] = 1; lastChange[p] = stepI; remaining--; }
-    const keep = [];
-    for (let t = 0; t < aliveList.length; t++) {
-      const ci = aliveList[t];
-      let ok = true;
-      for (let q = 0; q < chainLen[ci]; q++) if (adopted[chainPts[chainStart[ci] + q]]) { ok = false; break; }
-      if (ok) keep.push(ci);
+    for (const p of ch) {
+      adopted[p] = 1; lastChange[p] = stepI; remaining--;
+      for (let q = cop.start[p]; q < cop.start[p + 1]; q++) alive[cop.list[q]] = 0;
     }
-    aliveList = Int32Array.from(keep);
     ev.tourAfter = tour.slice();
     return ev;
   }
