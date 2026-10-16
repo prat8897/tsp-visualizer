@@ -21,7 +21,14 @@ No crossing, inside or area tests anywhere. All decisions go through one cost fu
 
 Once every point is adopted, a short 2-opt + Or-opt search with random kicks runs on the tour (4 kicks per point, a few tens of milliseconds). 2-opt and Or-opt alone find nothing on a construction tour: none of 48 tours checked exhaustively had an improving 2-opt move. The kicks (swap two neighbouring stretches, repair, keep only if shorter) are what pay. Every kept improvement is a step in the animation. Turn it off with the *Finish with a 2-opt and Or-opt search* checkbox or `polishIters: 0`.
 
+## Parallelism
+
+- **Parallel final searches.** The tour is built once, then the page runs the final search on several Web Workers at once (seeds 1 to K, K = cores - 1, 2 to 6) and keeps the shortest result. Wall time stays about one search. Measured on 12 random instances: best of 8 seeds is about 0.3% shorter than one seed at 120 and 200 points (854.98 vs 857.96, 1076.05 vs 1079.28), and beats a single search given 4x the iterations. Against OR-Tools on the 24 fresh instances the mean moves only from -1.10% to -1.13%, so this is a small gain. `node tests/fresh_parallel.mjs`.
+- **Batch adoption** (`batch: k`). Each round adopts up to k agreed pairs instead of one, taking the best first and then only pairs that share no points with it and whose candidate would not prefer one of the edges just created. `batch: 1` is the original rule and is what the Python parity test checks. 8 random instances: at 300 points batch 4 builds in 0.64 s instead of 0.82 s (final length equal within 0.2%); at 120 points 0.09 s vs 0.11 s. The page uses `batch: 4` above 150 points and 1 below, so small instances still animate one pair at a time.
+
 ## Tried and dropped
+
+- **Forking the first choice.** Running builds that start from the 2nd, 3rd... best agreed pair, or send the best candidate to its 2nd to 4th cheapest edge, gives the same final tour: re-adoption and the final search undo the difference. Best of 8 forks was within 0.1% of one build; best of 8 final-search seeds was 3x better, so only the final search is run in parallel.
 
 All measured against OR-Tools on random instances, small samples:
 

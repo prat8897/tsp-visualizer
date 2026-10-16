@@ -1,5 +1,5 @@
 import {
-  makeInstance, INSTANCE_KINDS, COSTS, DEFAULTS, edgeKey, edgeSet, distanceMatrix, tourLength, construct, referenceSolve,
+  makeInstance, INSTANCE_KINDS, COSTS, DEFAULTS, edgeKey, edgeSet, distanceMatrix, tourLength, construct, referenceSolve, iteratedLocalSearch, attachPolish, polishBudget,
 } from "./solver.js";
 import { Renderer, hex } from "./gl.js";
 
@@ -56,6 +56,38 @@ class Engine {
       this.worker.onerror = () => { this.worker = null; if (this.current) this._run(this.current, true); };
     } catch { this.worker = null; }
   }
+  /** Build once, then run the final search with several seeds side by side and keep the shortest tour. */
+  async solveParallel(P, n, opts) {
+    const wantPolish = opts.polishIters !== 0 && n >= 8;
+    const result = await this.solve(P, n, { ...opts, polishIters: 0 });
+    if (!result || !wantPolish) return result;
+    const iters = opts.polishIters || polishBudget(n);
+    const D = distanceMatrix(P, n);
+    const k = Math.max(2, Math.min(6, (navigator.hardwareConcurrency || 4) - 1));
+    const runs = await this.polishMany(P, n, result.tour, iters, k);
+    if (!runs.length) return result;
+    runs.sort((a, b) => tourLength(D, n, a.tour) - tourLength(D, n, b.tour) || a.seed - b.seed);
+    result.seedsTried = runs.length;
+    return attachPolish(result, D, runs[0]);
+  }
+  polishMany(P, n, tour, iters, k) {
+    const jobs = Array.from({ length: k }, (_, i) => new Promise((resolve) => {
+      try {
+        const w = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
+        w.onmessage = (e) => { w.terminate(); resolve(e.data.type === "polished" ? { ...e.data.result, seed: e.data.seed } : null); };
+        w.onerror = () => { w.terminate(); resolve(null); };
+        w.postMessage({ type: "polish", id: i, points: P, n, tour, iters, seed: i + 1 });
+      } catch { resolve(null); }
+    }));
+    return Promise.all(jobs).then(async (rs) => {
+      rs = rs.filter(Boolean);
+      if (!rs.length) {   // no workers: do a single search on this thread
+        const D = distanceMatrix(P, n);
+        rs = [{ ...iteratedLocalSearch(D, n, tour, { maxIters: iters, seed: 1, record: true }), seed: 1 }];
+      }
+      return rs;
+    });
+  }
   solve(P, n, opts) {
     return new Promise((resolve) => {
       const job = { id: ++this.id, P, n, opts, resolve };
@@ -104,7 +136,7 @@ async function solve({ animate }) {
   S.ref = null; S.refEdges = null;
   if (n < MIN_POINTS) { S.result = null; S.solving = false; updateAll(); return; }
   S.solving = true; updateAll();
-  const result = await engine.solve(S.P, n, { ...S.opts });
+  const result = await engine.solveParallel(S.P, n, { ...S.opts });
   if (my !== token || !result) return;
   S.result = result; S.solving = false;
   S.hullSet = new Set(result.hull);
@@ -153,6 +185,7 @@ function newInstance(kind = S.kind, n = S.n, seed = S.seed) {
   S.seed = seed;
   S.P = makeInstance(kind, S.n, seed);
   if (!S.arcTouched) S.opts.arcMax = autoArc(S.n);
+  S.opts.batch = S.n > 150 ? 4 : 1;      // big instances adopt several independent agreed pairs per round
   syncControls();
   solve({ animate: true });
   writeHash();
@@ -499,7 +532,7 @@ function updateText() {
     setText(el.sStep, F.kind === "final" ? `${E} of ${E}` : `${Math.min(E, Math.floor(S.t))} of ${E}`);
     setText(el.sHull, f1(R.hullLength));
     setText(el.sBuilt, `${R.ms < 10 ? R.ms.toFixed(1) : Math.round(R.ms)} ms`);
-    setText(el.sMoves, `${R.adoptions} adoptions, ${R.readoptions} re-adoptions, ${R.polishes} final-search swaps`);
+    setText(el.sMoves, `${R.adoptions} adoptions, ${R.readoptions} re-adoptions, ${R.polishes} final-search swaps${R.seedsTried > 1 ? ` (best of ${R.seedsTried} searches)` : ""}`);
     if (S.ref) {
       setText(el.sRef, `${f1(S.ref.length)} in ${(S.ref.ms / 1000).toFixed(1)} s`);
       const g = (R.length / S.ref.length - 1) * 100;

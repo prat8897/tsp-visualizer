@@ -36,6 +36,9 @@ export const DEFAULTS = {
   readopt: true,
   polishIters: null,     // iterations of the final search (2-opt + Or-opt with random kicks): null = 4 per point, 0 = off
   polishSeed: 1,
+  batch: 1,
+  forkRank: 0,
+  forkStep: 0,
   requireShorter: true,
   maxChains: 400000,     // safety valve: arc enumeration grows fast with arcMax
 };
@@ -169,6 +172,7 @@ export function construct(P, n, userOpts = {}) {
   const o = { ...DEFAULTS, ...userOpts };
   const cost = (COSTS[o.cost] || COSTS.detour).fn;
   const perPoint = o.rankBy === "per_point";
+  const batchSize = Math.max(1, o.batch | 0);
   const D = distanceMatrix(P, n);
 
   let tour = convexHull(P, n);
@@ -322,25 +326,57 @@ export function construct(P, n, userOpts = {}) {
       if (ci >= 0 && rowEdge[ci] === id) agreedRaw.push([ci, e, colMet[id]]);
     }
     if (!agreedRaw.length) throw new Error("no agreed pair -- is the cost function returning NaN?");
-    let pick = agreedRaw[0];
-    for (const x of agreedRaw) {
-      if (o.order === "best" ? x[2] < pick[2] : x[2] > pick[2]) pick = x;
-    }
     const costOf = (ci, e) => cost(D[tour[e] * n + first[ci]], arcLen[ci], D[last[ci] * n + tour[(e + 1) % m]], eD[slotId[e]], kPts[ci]);
-    const [pci, e] = pick;
-    const ch = chainOf(pci);
-    const ev = {
-      type: "adopt", step: stepI, chain: ch, edge: e, a: tour[e], c: tour[(e + 1) % m],
-      cost: costOf(pci, e), metric: pick[2],
-      agreed: agreedRaw.map(([ci, ee, met]) => ({ chain: chainOf(ci), edge: ee, metric: met, cost: costOf(ci, ee) })),
-    };
-    tour = tour.slice(0, e + 1).concat(ch, tour.slice(e + 1));
-    for (const p of ch) {
-      adopted[p] = 1; lastChange[p] = stepI; remaining--;
-      for (let q = cop.start[p]; q < cop.start[p + 1]; q++) alive[cop.list[q]] = 0;
+    // take the best agreed pair, then (batch > 1) further agreed pairs that cannot disturb it:
+    // no shared points, and no candidate that would rather take one of the edges just created
+    const ordered = agreedRaw.slice().sort((x, y) => (o.order === "best" ? x[2] - y[2] : y[2] - x[2]) || x[1] - y[1]);
+    // a fork diverges once, at step forkStep: the best candidate goes into its forkRank-th cheapest edge instead
+    if (o.forkRank > 0 && stepI === o.forkStep && m > 2) {
+      const ci = ordered[0][0], byEdge = [];
+      for (let e = 0; e < m; e++) byEdge.push([metricOf(ci, slotId[e]), e]);
+      byEdge.sort((x, y) => x[0] - y[0] || x[1] - y[1]);
+      const r = byEdge[Math.min(o.forkRank, byEdge.length - 1)];
+      ordered.splice(0, ordered.length, [ci, r[1], r[0]]);
     }
-    ev.tourAfter = tour.slice();
-    return ev;
+    const take = [ordered[0]];
+    const usedPts = new Set(chainOf(ordered[0][0]));
+    const newEdges = (ci, e) => {
+      const ch = chainOf(ci), a = tour[e], c = tour[(e + 1) % m], out = [[a, ch[0]], [ch[ch.length - 1], c]];
+      for (let q = 0; q + 1 < ch.length; q++) out.push([ch[q], ch[q + 1]]);
+      return out;
+    };
+    const fresh = batchSize > 1 ? newEdges(ordered[0][0], ordered[0][1]) : [];
+    for (let q = 1; q < ordered.length && take.length < batchSize; q++) {
+      const [cj, ej, mj] = ordered[q];
+      const chj = chainOf(cj);
+      if (chj.some((p) => usedPts.has(p))) continue;
+      const k = kPts[cj];
+      let ok = true;
+      for (const [u, v] of fresh) {
+        const c = cost(D[u * n + first[cj]], arcLen[cj], D[last[cj] * n + v], D[u * n + v], k);
+        if ((perPoint ? c / k : c) < mj) { ok = false; break; }
+      }
+      if (!ok) continue;
+      take.push(ordered[q]);
+      for (const p of chj) usedPts.add(p);
+      for (const x of newEdges(cj, ej)) fresh.push(x);
+    }
+    take.sort((x, y) => y[1] - x[1]);              // splice from the back so earlier edge positions stay valid
+    const agreedInfo = agreedRaw.map(([ci, ee, met]) => ({ chain: chainOf(ci), edge: ee, metric: met, cost: costOf(ci, ee) }));
+    const evs = [];
+    for (const [pci, e, met] of take) {
+      const ch = chainOf(pci);
+      const ev = { type: "adopt", step: stepI, chain: ch, edge: e, a: tour[e], c: tour[(e + 1) % tour.length], cost: costOf(pci, e), metric: met };
+      if (!evs.length) ev.agreed = agreedInfo;
+      tour = tour.slice(0, e + 1).concat(ch, tour.slice(e + 1));
+      for (const p of ch) {
+        adopted[p] = 1; lastChange[p] = stepI; remaining--;
+        for (let q = cop.start[p]; q < cop.start[p + 1]; q++) alive[cop.list[q]] = 0;
+      }
+      ev.tourAfter = tour.slice();
+      evs.push(ev);
+    }
+    return evs;
   }
 
   /* ---- re-adoption: lift an adopted point / arc out and re-adopt it into another edge ---- */
@@ -394,7 +430,7 @@ export function construct(P, n, userOpts = {}) {
   let stepI = 0;
   while (stepI < 3 * n + 30) {
     const batch = [];
-    if (remaining > 0) batch.push(adoptStep(stepI));
+    if (remaining > 0) batch.push(...adoptStep(stepI));
     if (o.readopt) for (let mv; (mv = bestReadopt(stepI)); ) batch.push(mv);
     if (!batch.length) break;
     events.push(...batch);
@@ -402,7 +438,7 @@ export function construct(P, n, userOpts = {}) {
   }
 
   /* ---- finish: a short 2-opt + Or-opt search with random kicks; every improvement is its own step ---- */
-  const polishIters = o.polishIters === null || o.polishIters === undefined ? Math.min(2000, Math.max(200, 4 * n)) : o.polishIters;
+  const polishIters = o.polishIters === null || o.polishIters === undefined ? polishBudget(n) : o.polishIters;
   if (polishIters > 0 && n >= 8) {
     const res = iteratedLocalSearch(D, n, tour, { maxIters: polishIters, seed: o.polishSeed, record: true });
     for (const ev of res.improvements) events.push({ ...ev, step: stepI++ });
@@ -424,6 +460,19 @@ export function construct(P, n, userOpts = {}) {
    kicks; a kick is kept only if the tour ends up shorter. On a construction tour 2-opt and Or-opt alone find
    nothing (those tours are already locally optimal), so the kicks are what pay. With `record`, every accepted
    improvement is returned as a "polish" event listing the edges it removed and added. */
+/** Default number of final-search iterations for n points. */
+export const polishBudget = (n) => Math.min(2000, Math.max(200, 4 * n));
+
+/** Append the winning final search (from a construct() run made with polishIters: 0) to that result. */
+export function attachPolish(result, D, res) {
+  let step = result.events.length ? result.events[result.events.length - 1].step + 1 : 0;
+  for (const ev of res.improvements) result.events.push({ ...ev, step: step++ });
+  result.tour = res.tour;
+  result.length = tourLength(D, result.n, res.tour);
+  result.polishes = res.improvements.length;
+  return result;
+}
+
 export function iteratedLocalSearch(D, n, startTour, { budgetMs = Infinity, maxIters = Infinity, seed = 1, record = false } = {}) {
   const now = () => (typeof performance !== "undefined" ? performance : Date).now();
   const start = now();
