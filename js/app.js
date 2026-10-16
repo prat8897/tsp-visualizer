@@ -2,6 +2,7 @@ import {
   makeInstance, INSTANCE_KINDS, COSTS, DEFAULTS, edgeKey, edgeSet, distanceMatrix, tourLength, construct, referenceSolve, iteratedLocalSearch, attachPolish, polishBudget,
 } from "./solver.js";
 import { Renderer, hex } from "./gl.js";
+import { finishInParallel, attachSqueeze, runJob } from "./finish.js";
 
 /* ============================================================================ constants */
 const COL = {
@@ -19,7 +20,7 @@ const el = {
   scrub: $("scrub"), speed: $("speed"), speedLabel: $("speedLabel"),
   kind: $("kind"), n: $("n"), nLabel: $("nLabel"), seed: $("seed"), shuffle: $("shuffle"), clear: $("clear"),
   edit: $("edit"),
-  cost: $("cost"), arc: $("arc"), arcLabel: $("arcLabel"), readopt: $("readopt"), polish: $("polish"), order: $("order"), rank: $("rank"),
+  cost: $("cost"), arc: $("arc"), arcLabel: $("arcLabel"), readopt: $("readopt"), polish: $("polish"), squeeze: $("squeeze"), order: $("order"), rank: $("rank"),
   knn: $("knn"), knnLabel: $("knnLabel"),
   forces: $("forces"), numbers: $("numbers"), compare: $("compare"), showRef: $("showRef"),
   sLen: $("sLen"), sStep: $("sStep"), sHull: $("sHull"), sBuilt: $("sBuilt"), sRef: $("sRef"), sGap: $("sGap"), sShared: $("sShared"),
@@ -61,6 +62,13 @@ class Engine {
     const wantPolish = opts.polishIters !== 0 && n >= 8;
     const result = await this.solve(P, n, { ...opts, polishIters: 0 });
     if (!result || !wantPolish) return result;
+    if (opts.squeeze && n >= 40) {
+      const k = Math.max(2, Math.min(6, (navigator.hardwareConcurrency || 4) - 1));
+      const D = distanceMatrix(P, n);
+      const fin = await finishInParallel(P, n, result, (jobs) => this.runJobs(P, n, jobs), { workers: Math.min(k, 4), iters: opts.polishIters || polishBudget(n), buildOpts: opts });
+      result.seedsTried = Math.min(k, 4);
+      return attachSqueeze(result, D, fin.tour, fin.stats);
+    }
     const iters = opts.polishIters || polishBudget(n);
     const D = distanceMatrix(P, n);
     const k = Math.max(2, Math.min(6, (navigator.hardwareConcurrency || 4) - 1));
@@ -69,6 +77,18 @@ class Engine {
     runs.sort((a, b) => tourLength(D, n, a.tour) - tourLength(D, n, b.tour) || a.seed - b.seed);
     result.seedsTried = runs.length;
     return attachPolish(result, D, runs[0]);
+  }
+  /** Run jobs side by side, one worker each; a job whose worker fails is run here instead. */
+  runJobs(P, n, jobs) {
+    return Promise.all(jobs.map((job, i) => new Promise((resolve) => {
+      const local = () => setTimeout(() => resolve(runJob(P, n, job)), 0);
+      try {
+        const w = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
+        w.onmessage = (e) => { w.terminate(); if (e.data.type === "jobdone") resolve(e.data.result); else local(); };
+        w.onerror = () => { w.terminate(); local(); };
+        w.postMessage({ type: "job", id: i, points: P, n, job });
+      } catch { local(); }
+    })));
   }
   polishMany(P, n, tour, iters, k) {
     const jobs = Array.from({ length: k }, (_, i) => new Promise((resolve) => {
@@ -198,7 +218,7 @@ function syncControls() {
   el.nLabel.textContent = String(n);
   el.seed.value = String(S.seed);
   el.cost.value = S.opts.cost; el.arc.value = String(S.opts.arcMax); el.arcLabel.textContent = String(S.opts.arcMax);
-  el.readopt.checked = S.opts.readopt; el.polish.checked = S.opts.polishIters !== 0; el.order.value = S.opts.order; el.rank.value = S.opts.rankBy;
+  el.readopt.checked = S.opts.readopt; el.polish.checked = S.opts.polishIters !== 0; el.squeeze.checked = !!S.opts.squeeze; el.order.value = S.opts.order; el.rank.value = S.opts.rankBy;
   el.knn.value = String(S.opts.knn); el.knnLabel.textContent = String(S.opts.knn);
   el.numbers.checked = S.showNumbers; el.compare.checked = S.compare; el.showRef.checked = S.showRef;
   for (const b of document.querySelectorAll("[data-edit]")) b.setAttribute("aria-pressed", String(b.dataset.edit === S.editMode));
@@ -242,6 +262,7 @@ function bindControls() {
   el.arc.oninput = () => { S.arcTouched = true; el.arcLabel.textContent = el.arc.value; later(() => { S.opts.arcMax = +el.arc.value; opt(); }); };
   el.knn.oninput = () => { el.knnLabel.textContent = el.knn.value; later(() => { S.opts.knn = +el.knn.value; opt(); }); };
   el.readopt.onchange = () => { S.opts.readopt = el.readopt.checked; opt(); };
+  el.squeeze.onchange = () => { S.opts.squeeze = el.squeeze.checked; opt(); };
   el.polish.onchange = () => { S.opts.polishIters = el.polish.checked ? null : 0; opt(); };
   el.order.onchange = () => { S.opts.order = el.order.value; opt(); };
   el.rank.onchange = () => { S.opts.rankBy = el.rank.value; opt(); };
@@ -516,7 +537,8 @@ function updateText() {
     cap = `Step ${ev.step + 1}: re-adopted ${label(ev.arc)}, lifted from between ${ev.u} and ${ev.w} into edge ${ev.a}-${ev.b}, saving ${ev.net.toFixed(2)}.`;
   } else if (F.kind === "polish") {
     const ev = F.ev;
-    cap = `Step ${ev.step + 1}: final search swapped ${ev.removed.length} edges for ${ev.added.length} and saved ${ev.net.toFixed(2)}. Tour now ${f1(len(ev.tourAfter))}.`;
+    if (ev.squeeze) cap = `Step ${ev.step + 1}: the parallel stages (race of cost functions, merge, split search) swapped ${ev.removed.length} edges for ${ev.added.length} and saved ${ev.net.toFixed(2)}. Tour now ${f1(len(ev.tourAfter))}.`;
+    else cap = `Step ${ev.step + 1}: final search swapped ${ev.removed.length} edges for ${ev.added.length} and saved ${ev.net.toFixed(2)}. Tour now ${f1(len(ev.tourAfter))}.`;
   } else {
     cap = `Done: length ${f1(R.length)} after ${R.adoptions} adoptions, ${R.readoptions} re-adoptions and ${R.polishes} final-search improvements.`;
   }

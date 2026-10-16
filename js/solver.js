@@ -448,7 +448,7 @@ export function construct(P, n, userOpts = {}) {
   return {
     events, hull, tour, n,
     length: tourLength(D, n, tour), hullLength: tourLength(D, n, hull),
-    ms: now - t0, chains: C, arcMaxUsed, arcMaxAsked: arcMax, capped: cappedAt > 0,
+    ms: now - t0, costUsed: o.cost, chains: C, arcMaxUsed, arcMaxAsked: arcMax, capped: cappedAt > 0,
     adoptions: events.filter((e) => e.type === "adopt").length,
     readoptions: events.filter((e) => e.type === "readopt").length,
     polishes: events.filter((e) => e.type === "polish").length,

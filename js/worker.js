@@ -1,5 +1,6 @@
 // Web Worker: keeps the page responsive while the solver runs.
 import { construct, referenceSolve, distanceMatrix, iteratedLocalSearch } from "./solver.js";
+import { runJob } from "./finish.js";
 
 self.onmessage = (e) => {
   const m = e.data;
@@ -12,6 +13,8 @@ self.onmessage = (e) => {
       const D = distanceMatrix(m.points, m.n);
       const res = iteratedLocalSearch(D, m.n, m.tour, { maxIters: m.iters, seed: m.seed, record: true });
       self.postMessage({ type: "polished", id: m.id, seed: m.seed, result: res });
+    } else if (m.type === "job") {
+      self.postMessage({ type: "jobdone", id: m.id, result: runJob(m.points, m.n, m.job) });
     } else if (m.type === "reference") {
       const result = referenceSolve(m.points, m.n, m.budgetMs, m.seed || 1);
       self.postMessage({ type: "reference", id: m.id, result });
