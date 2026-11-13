@@ -21,12 +21,24 @@ No crossing, inside or area tests anywhere. All decisions go through one cost fu
 
 Once every point is adopted, a short 2-opt + Or-opt search with random kicks runs on the tour (4 kicks per point, a few tens of milliseconds). 2-opt and Or-opt alone find nothing on a construction tour: none of 48 tours checked exhaustively had an improving 2-opt move. The kicks (swap two neighbouring stretches, repair, keep only if shorter) are what pay. Every kept improvement is a step in the animation. Turn it off with the *Finish with a 2-opt and Or-opt search* checkbox or `polishIters: 0`.
 
+**Raise the cost to a peak, then descend (the default).** Instead of only swapping two random stretches, the search can push the tour *up*: it applies a few deliberate uphill 2-opt moves in a row (the steepest cost increase each time, always around the last move), reaching a local peak, and then runs the same strict descent (2-opt + Or-opt, improving moves only). The result is kept only if it ends shorter than the best tour, otherwise it is undone. Climbs are 2 to `climbSteps` moves long; `perturb: "kick"` is the old random swap, `"climb"` is climbing only, and `"mixed"` (default, `climbSteps: 20`) alternates the two. A climb costs more per round than a kick, so compare at equal time. Gap above LKH, 6 random instances per size never used while building it (`tests/bench_lkh_fresh.json`):
+
+| points | kicks | kicks, 3x the rounds (equal time to climb) | mixed (default) | climb only, 30 steps |
+|---|---|---|---|---|
+| 120 | 0.15% (64 ms) | 0.05% (164 ms) | 0.08% (76 ms) | 0.07% (132 ms) |
+| 200 | 0.54% (99 ms) | 0.35% (256 ms) | 0.23% (148 ms) | 0.14% (273 ms) |
+| 300 | 0.45% (185 ms) | 0.29% (487 ms) | 0.26% (267 ms) | 0.12% (480 ms) |
+
+At 120 points kicks are as good; from 200 points up climbing wins at the same time, and the higher the peak the better (on the 300-point tuning instances 4 steps was worse than kicks, 8 about equal, 30 clearly better). Gentle climbs (the smallest uphill move each time) are much worse: the descent just undoes them. In the squeeze the race searches and the split searches use climb-only with 30 steps.
+
 ## Parallelism
 
 - **Parallel final searches.** The tour is built once, then the page runs the final search on several Web Workers at once (seeds 1 to K, K = cores - 1, 2 to 6) and keeps the shortest result. Wall time stays about one search. Measured on 12 random instances: best of 8 seeds is about 0.3% shorter than one seed at 120 and 200 points (854.98 vs 857.96, 1076.05 vs 1079.28), and beats a single search given 4x the iterations. Against OR-Tools on the 24 fresh instances the mean moves only from -1.10% to -1.13%, so this is a small gain. `node tests/fresh_parallel.mjs`.
 - **Batch adoption** (`batch: k`). Each round adopts up to k agreed pairs instead of one, taking the best first and then only pairs that share no points with it and whose candidate would not prefer one of the edges just created. `batch: 1` is the original rule and is what the Python parity test checks. 8 random instances: at 300 points batch 4 builds in 0.64 s instead of 0.82 s (final length equal within 0.2%); at 120 points 0.09 s vs 0.11 s. The page uses `batch: 4` above 150 points and 1 below, so small instances still animate one pair at a time.
 
 ### Squeeze with all cores (opt-in)
+
+(The table below was measured with random kicks. With climbing, squeeze on the 6 fresh instances per size is 0.07%, 0.05%, 0.06% above LKH at 120, 200, 300 points, about 0.4 s, 1.0 s, 2.3 s simulated wall; on the 4 earlier instances 0.00%, 0.15%, 0.03%.)
 
 Tick *Squeeze with all cores*, or run `finishInParallel` from `js/finish.js`. Three stages, each spread over Web Workers:
 
@@ -36,7 +48,7 @@ Tick *Squeeze with all cores*, or run `finishInParallel` from `js/finish.js`. Th
 
 Measured against LKH (near-optimal, `pip install elkai`, `tests/bench_lkh.py`), gap above LKH, mean of 4-5 random instances. Wall time is simulated as if every job had its own core (`tests/finish_vs_lkh.mjs`):
 
-| points | default (build + 1 search) | squeeze | squeeze wall |
+| points | default (build + 1 search, kicks) | squeeze (kicks) | squeeze wall |
 |---|---|---|---|
 | 120 | 0.20% | 0.00% | 0.4 s |
 | 200 | 0.37% | 0.11% | 0.9 s |

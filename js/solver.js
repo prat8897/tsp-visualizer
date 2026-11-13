@@ -36,6 +36,8 @@ export const DEFAULTS = {
   readopt: true,
   polishIters: null,     // iterations of the final search (2-opt + Or-opt with random kicks): null = 4 per point, 0 = off
   polishSeed: 1,
+  perturb: "mixed",      // final search: "kick" (random segment swap), "climb" (raise the cost, then strict descent) or "mixed" (alternate)
+  climbSteps: 20,
   batch: 1,
   forkRank: 0,
   forkStep: 0,
@@ -440,7 +442,7 @@ export function construct(P, n, userOpts = {}) {
   /* ---- finish: a short 2-opt + Or-opt search with random kicks; every improvement is its own step ---- */
   const polishIters = o.polishIters === null || o.polishIters === undefined ? polishBudget(n) : o.polishIters;
   if (polishIters > 0 && n >= 8) {
-    const res = iteratedLocalSearch(D, n, tour, { maxIters: polishIters, seed: o.polishSeed, record: true });
+    const res = iteratedLocalSearch(D, n, tour, { maxIters: polishIters, seed: o.polishSeed, record: true, perturb: o.perturb, climbSteps: o.climbSteps });
     for (const ev of res.improvements) events.push({ ...ev, step: stepI++ });
     tour = res.tour;
   }
@@ -473,7 +475,7 @@ export function attachPolish(result, D, res) {
   return result;
 }
 
-export function iteratedLocalSearch(D, n, startTour, { budgetMs = Infinity, maxIters = Infinity, seed = 1, record = false } = {}) {
+export function iteratedLocalSearch(D, n, startTour, { budgetMs = Infinity, maxIters = Infinity, seed = 1, record = false, perturb = "kick", climbSteps = 4 } = {}) {
   const now = () => (typeof performance !== "undefined" ? performance : Date).now();
   const start = now();
   const rnd = mulberry32(seed);
@@ -582,17 +584,49 @@ export function iteratedLocalSearch(D, n, startTour, { budgetMs = Infinity, maxI
   };
   localSearch(t.slice());
   { const L0 = len(); if (L0 < bestLen - 1e-9) keep(t, L0); }
+  /* climb: instead of a random kick, push the cost UP with deliberate uphill 2-opt moves (a few steps, always around the
+     last move), then let the strict descent below bring it back down, hopefully into a different valley */
+  function climb(steps, mode) {
+    const touched = [];
+    let a = Math.floor(rnd() * n);
+    for (let s = 0; s < steps; s++) {
+      let bestDelta = mode === "gentle" ? Infinity : -Infinity, mv = null;
+      for (let dir = 0; dir < 2; dir++) {
+        const b = dir ? prv(a) : nxt(a);
+        for (const c of neigh[a]) {
+          const d = dir ? prv(c) : nxt(c);
+          if (c === b || d === a) continue;
+          const delta = D[a * n + c] + D[b * n + d] - D[a * n + b] - D[c * n + d];   // how much the tour gets longer
+          if (delta <= EPS) continue;
+          if (mode === "gentle" ? delta < bestDelta : delta > bestDelta) { bestDelta = delta; mv = [dir, b, c, d]; }
+        }
+      }
+      if (!mv) break;
+      const [dir, b, c, d] = mv;
+      if (dir === 0) reverse(pos[b], pos[c]); else reverse(pos[a], pos[d]);
+      touched.push(a, b, c, d);
+      a = [b, c, d][Math.floor(rnd() * 3)];
+    }
+    return touched;
+  }
+
   let iters = 0;
   while (iters < maxIters && now() - start < budgetMs && n >= 8) {
     iters++;
-    const i = Math.floor(rnd() * n);
-    const maxSeg = Math.max(1, Math.min(30, Math.floor((n - 2) / 2)));
-    const l1 = 1 + Math.floor(rnd() * maxSeg), l2 = 1 + Math.floor(rnd() * maxSeg);
-    const arr = [];
-    for (let q = 0; q < n; q++) arr.push(t[(i + 1 + q) % n]);
-    const touched = [t[i], arr[0], arr[l1 - 1], arr[l1], arr[l1 + l2 - 1], arr[(l1 + l2) % n]];
-    t = arr.slice(l1, l1 + l2).concat(arr.slice(0, l1), arr.slice(l1 + l2));
-    setPos();
+    let touched;
+    if (perturb === "climb" || perturb === "gentle" || (perturb === "mixed" && iters % 2 === 0)) {
+      touched = climb(2 + Math.floor(rnd() * (climbSteps - 1)), perturb === "gentle" ? "gentle" : "steep");
+      if (!touched.length) continue;
+    } else {
+      const i = Math.floor(rnd() * n);
+      const maxSeg = Math.max(1, Math.min(30, Math.floor((n - 2) / 2)));
+      const l1 = 1 + Math.floor(rnd() * maxSeg), l2 = 1 + Math.floor(rnd() * maxSeg);
+      const arr = [];
+      for (let q = 0; q < n; q++) arr.push(t[(i + 1 + q) % n]);
+      touched = [t[i], arr[0], arr[l1 - 1], arr[l1], arr[l1 + l2 - 1], arr[(l1 + l2) % n]];
+      t = arr.slice(l1, l1 + l2).concat(arr.slice(0, l1), arr.slice(l1 + l2));
+      setPos();
+    }
     localSearch(touched);
     const L2 = len();
     if (L2 < bestLen - 1e-9) keep(t, L2);

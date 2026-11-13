@@ -100,6 +100,9 @@
       </label>
       <label class="check"><input id="readopt" type="checkbox" checked><span>Re-adopt points that fit better elsewhere</span></label>
       <label class="check"><input id="polish" type="checkbox" checked><span>Finish with a 2-opt and Or-opt search</span></label>
+      <label class="field"><span>Final search escapes by</span>
+        <select id="perturb"><option value="mixed">Climbing and kicks, alternating</option><option value="climb">Climbing to a peak, then strict descent</option><option value="kick">Random kicks</option></select>
+      </label>
       <label class="check"><input id="squeeze" type="checkbox"><span>Squeeze with all cores (race, merge, split)</span></label>
       <label class="field"><span>Adopt first</span>
         <select id="order"><option value="best">The cheapest agreed pair</option><option value="worst">The most expensive agreed pair</option></select>

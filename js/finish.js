@@ -12,14 +12,14 @@ const BIG = 1e7;
 /* ---------------------------------------------------------------- 3. segment search (the worker half) */
 
 /** Improve a path with both ends fixed: the same iterated local search on the closed loop, with the closing edge made un-removable. */
-export function improvePath(P, path, iters, seed) {
+export function improvePath(P, path, iters, seed, perturb = "kick", climbSteps = 4) {
   const m = path.length;
   if (m < 8) return path.slice();
   const Q = new Float64Array(2 * m);
   for (let i = 0; i < m; i++) { Q[2 * i] = P[2 * path[i]]; Q[2 * i + 1] = P[2 * path[i] + 1]; }
   const D = distanceMatrix(Q, m);
   D[m - 1] = D[(m - 1) * m] = -BIG;                       // entry 0 <-> m-1
-  const res = iteratedLocalSearch(D, m, Array.from({ length: m }, (_, i) => i), { maxIters: iters, seed });
+  const res = iteratedLocalSearch(D, m, Array.from({ length: m }, (_, i) => i), { maxIters: iters, seed, perturb, climbSteps });
   const t = res.tour, i0 = t.indexOf(0), dir = t[(i0 + 1) % m] === m - 1 ? -1 : 1;
   const out = new Array(m);
   for (let q = 0; q < m; q++) out[q] = path[t[(i0 + dir * q + 2 * m) % m]];
@@ -111,7 +111,7 @@ export const RACE_COSTS = ["detour", "perPoint", "log"];
  *            {type:"path", path, iters, seed} -> {path}
  * `first` is the construction result (with events) the page animates; its own cost function is not rebuilt.
  */
-export async function finishInParallel(P, n, first, exec, { workers = 4, iters, rounds = 2, segIters, buildOpts = {} } = {}) {
+export async function finishInParallel(P, n, first, exec, { workers = 4, iters, rounds = 2, segIters, buildOpts = {}, perturb = "climb", climbSteps = 30 } = {}) {
   const D = distanceMatrix(P, n);
   const stats = { stages: [] };
   const mark = (name, tour) => stats.stages.push({ name, length: tourLength(D, n, tour) });
@@ -122,7 +122,7 @@ export async function finishInParallel(P, n, first, exec, { workers = 4, iters, 
   // 1. race: the first tour + one build per other cost function, each polished with its own seed
   const builds = await exec(others.map((cost) => ({ type: "build", opts: { ...buildOpts, cost, polishIters: 0 } })));
   const starts = [first.tour, ...builds.map((b) => b.tour)];
-  const polished = await exec(starts.map((tour, i) => ({ type: "polish", tour, iters, seed: i + 1 })));
+  const polished = await exec(starts.map((tour, i) => ({ type: "polish", tour, iters, seed: i + 1, perturb, climbSteps })));
   const tours = polished.map((r) => r.tour);
   mark("race (best single)", tours.reduce((b, t) => (tourLength(D, n, t) < tourLength(D, n, b) ? t : b)));
 
@@ -135,7 +135,7 @@ export async function finishInParallel(P, n, first, exec, { workers = 4, iters, 
   if (parts > 1) {
     for (let r = 0; r < rounds; r++) {
       const cuts = cutTour(tour, parts, Math.floor((r * n) / (parts * rounds)));
-      const res = await exec(cuts.map((path, i) => ({ type: "path", path, iters: segIters || Math.max(100, 6 * path.length), seed: 10 * r + i + 1 })));
+      const res = await exec(cuts.map((path, i) => ({ type: "path", path, iters: segIters || Math.max(100, 6 * path.length), seed: 10 * r + i + 1, perturb, climbSteps })));
       const joined = [].concat(...res.map((x) => x.path));
       if (tourLength(D, n, joined) <= tourLength(D, n, tour) + 1e-9) tour = joined;
     }
@@ -149,9 +149,9 @@ export function runJob(P, n, job) {
   if (job.type === "build") return { tour: construct(P, n, job.opts).tour };
   if (job.type === "polish") {
     const D = distanceMatrix(P, n);
-    return { tour: iteratedLocalSearch(D, n, job.tour, { maxIters: job.iters, seed: job.seed }).tour };
+    return { tour: iteratedLocalSearch(D, n, job.tour, { maxIters: job.iters, seed: job.seed, perturb: job.perturb, climbSteps: job.climbSteps }).tour };
   }
-  if (job.type === "path") return { path: improvePath(P, job.path, job.iters, job.seed) };
+  if (job.type === "path") return { path: improvePath(P, job.path, job.iters, job.seed, job.perturb, job.climbSteps) };
   throw new Error("unknown job " + job.type);
 }
 

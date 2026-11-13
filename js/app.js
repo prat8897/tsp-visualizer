@@ -20,7 +20,7 @@ const el = {
   scrub: $("scrub"), speed: $("speed"), speedLabel: $("speedLabel"),
   kind: $("kind"), n: $("n"), nLabel: $("nLabel"), seed: $("seed"), shuffle: $("shuffle"), clear: $("clear"),
   edit: $("edit"),
-  cost: $("cost"), arc: $("arc"), arcLabel: $("arcLabel"), readopt: $("readopt"), polish: $("polish"), squeeze: $("squeeze"), order: $("order"), rank: $("rank"),
+  cost: $("cost"), arc: $("arc"), arcLabel: $("arcLabel"), readopt: $("readopt"), polish: $("polish"), squeeze: $("squeeze"), perturb: $("perturb"), order: $("order"), rank: $("rank"),
   knn: $("knn"), knnLabel: $("knnLabel"),
   forces: $("forces"), numbers: $("numbers"), compare: $("compare"), showRef: $("showRef"),
   sLen: $("sLen"), sStep: $("sStep"), sHull: $("sHull"), sBuilt: $("sBuilt"), sRef: $("sRef"), sGap: $("sGap"), sShared: $("sShared"),
@@ -96,7 +96,7 @@ class Engine {
         const w = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
         w.onmessage = (e) => { w.terminate(); resolve(e.data.type === "polished" ? { ...e.data.result, seed: e.data.seed } : null); };
         w.onerror = () => { w.terminate(); resolve(null); };
-        w.postMessage({ type: "polish", id: i, points: P, n, tour, iters, seed: i + 1 });
+        w.postMessage({ type: "polish", id: i, points: P, n, tour, iters, seed: i + 1, perturb: S.opts.perturb, climbSteps: S.opts.climbSteps });
       } catch { resolve(null); }
     }));
     return Promise.all(jobs).then(async (rs) => {
@@ -218,7 +218,7 @@ function syncControls() {
   el.nLabel.textContent = String(n);
   el.seed.value = String(S.seed);
   el.cost.value = S.opts.cost; el.arc.value = String(S.opts.arcMax); el.arcLabel.textContent = String(S.opts.arcMax);
-  el.readopt.checked = S.opts.readopt; el.polish.checked = S.opts.polishIters !== 0; el.squeeze.checked = !!S.opts.squeeze; el.order.value = S.opts.order; el.rank.value = S.opts.rankBy;
+  el.readopt.checked = S.opts.readopt; el.polish.checked = S.opts.polishIters !== 0; el.squeeze.checked = !!S.opts.squeeze; el.perturb.value = S.opts.perturb; el.order.value = S.opts.order; el.rank.value = S.opts.rankBy;
   el.knn.value = String(S.opts.knn); el.knnLabel.textContent = String(S.opts.knn);
   el.numbers.checked = S.showNumbers; el.compare.checked = S.compare; el.showRef.checked = S.showRef;
   for (const b of document.querySelectorAll("[data-edit]")) b.setAttribute("aria-pressed", String(b.dataset.edit === S.editMode));
@@ -262,6 +262,7 @@ function bindControls() {
   el.arc.oninput = () => { S.arcTouched = true; el.arcLabel.textContent = el.arc.value; later(() => { S.opts.arcMax = +el.arc.value; opt(); }); };
   el.knn.oninput = () => { el.knnLabel.textContent = el.knn.value; later(() => { S.opts.knn = +el.knn.value; opt(); }); };
   el.readopt.onchange = () => { S.opts.readopt = el.readopt.checked; opt(); };
+  el.perturb.onchange = () => { S.opts.perturb = el.perturb.value; S.opts.climbSteps = el.perturb.value === "climb" ? 30 : 20; opt(); };
   el.squeeze.onchange = () => { S.opts.squeeze = el.squeeze.checked; opt(); };
   el.polish.onchange = () => { S.opts.polishIters = el.polish.checked ? null : 0; opt(); };
   el.order.onchange = () => { S.opts.order = el.order.value; opt(); };

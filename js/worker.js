@@ -11,7 +11,7 @@ self.onmessage = (e) => {
     } else if (m.type === "polish") {
       // one of several final searches that run side by side, each with its own random seed
       const D = distanceMatrix(m.points, m.n);
-      const res = iteratedLocalSearch(D, m.n, m.tour, { maxIters: m.iters, seed: m.seed, record: true });
+      const res = iteratedLocalSearch(D, m.n, m.tour, { maxIters: m.iters, seed: m.seed, record: true, perturb: m.perturb, climbSteps: m.climbSteps });
       self.postMessage({ type: "polished", id: m.id, seed: m.seed, result: res });
     } else if (m.type === "job") {
       self.postMessage({ type: "jobdone", id: m.id, result: runJob(m.points, m.n, m.job) });

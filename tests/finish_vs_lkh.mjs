@@ -11,7 +11,7 @@ for (const r of rows.filter((x) => only.includes(x.n))) {
   let wall = first.ms;
   const exec = async (jobs) => { let slow = 0; const out = jobs.map((j) => { const t = performance.now(); const o = runJob(P, n, j); slow = Math.max(slow, performance.now() - t); return o; }); wall += slow; return out; };
   const res = await finishInParallel(P, n, first, exec, { workers: 4, iters: polishBudget(n), buildOpts: { batch } });
-  const single = r.ours, sq = res.length;
+  const single = r.ours || construct(P, n, { batch }).length, sq = res.length;
   const a = (agg[n] ||= { single: 0, squeeze: 0, k: 0, wall: 0 });
   a.single += (single / r.lkh - 1) * 100; a.squeeze += (sq / r.lkh - 1) * 100; a.k++; a.wall += wall;
   console.log(`n=${n} seed=${r.seed} lkh ${r.lkh.toFixed(1)}  single ${single.toFixed(1)} (+${((single / r.lkh - 1) * 100).toFixed(2)}%)  squeeze ${sq.toFixed(1)} (+${((sq / r.lkh - 1) * 100).toFixed(2)}%)`);
